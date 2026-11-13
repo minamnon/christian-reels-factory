@@ -3,13 +3,14 @@ import json
 import math
 import os
 import re
+import html
 import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, features
+from PIL import Image, ImageDraw, ImageFont, ImageOps, features
 
 
 WIDTH = 1080
@@ -20,12 +21,93 @@ VOICE_MODEL = "eleven_multilingual_v2"
 API_BASE = "https://api.elevenlabs.io/v1"
 VOICES_URL = "https://api.elevenlabs.io/v2/voices"
 
+COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+COMMONS_USER_AGENT = (
+    "ChristianReelsFactory/1.0 "
+    "(automated educational video production)"
+)
+
 ROOT = Path.cwd()
 OUTPUT = ROOT / "output"
 WORK = ROOT / "render_work"
 
 OUTPUT.mkdir(exist_ok=True)
 WORK.mkdir(exist_ok=True)
+
+
+# كلمات عربية تساعد على اختيار صور مناسبة للمشهد.
+# يمكن إضافة كلمات جديدة لاحقًا حسب موضوعات الريلز.
+
+IMAGE_KEYWORDS = {
+    "غفران": "forgiveness Christian prayer",
+    "سامح": "forgiveness Christian prayer",
+    "المسامحة": "forgiveness Christian prayer",
+    "محبة": "Christian love Jesus",
+    "الحب": "Christian love Jesus",
+    "يسوع": "Jesus Christ",
+    "المسيح": "Jesus Christ",
+    "صلاة": "Christian prayer praying",
+    "الصلاة": "Christian prayer praying",
+    "يصلي": "Christian prayer praying",
+    "صليب": "Christian cross",
+    "الصليب": "Christian cross",
+    "رجاء": "Christian hope sunrise",
+    "الأمل": "Christian hope sunrise",
+    "إيمان": "Christian faith Bible",
+    "الايمان": "Christian faith Bible",
+    "الخوف": "fear hope Christian",
+    "قلق": "anxiety prayer",
+    "السلام": "peace Christian nature",
+    "سلام": "peace Christian nature",
+    "نعمة": "Christian grace",
+    "التوبة": "repentance Christian",
+    "توبة": "repentance Christian",
+    "القيامة": "Resurrection of Jesus",
+    "قيامة": "Resurrection of Jesus",
+    "ميلاد": "Nativity of Jesus",
+    "الميلاد": "Nativity of Jesus",
+    "مريم": "Virgin Mary Christian",
+    "يوسف": "Saint Joseph Christian",
+    "موسى": "Moses biblical",
+    "داود": "King David biblical",
+    "إبراهيم": "Abraham biblical",
+    "بطرس": "Saint Peter apostle",
+    "بولس": "Saint Paul apostle",
+    "الكتاب المقدس": "Holy Bible",
+    "الإنجيل": "Holy Bible",
+    "الانجيل": "Holy Bible",
+    "الراعي": "Good Shepherd Jesus sheep",
+    "خروف": "sheep shepherd",
+    "الرحمة": "mercy Christian",
+    "رحمة": "mercy Christian",
+    "الصبر": "patience Christian prayer",
+    "صبر": "patience Christian prayer",
+    "الخطية": "repentance Christian",
+    "الخطيئة": "repentance Christian",
+    "الخلاص": "Christian salvation cross",
+    "نور": "light church sunlight",
+    "النور": "light church sunlight",
+    "ظلمة": "darkness light Christian",
+    "الظلام": "darkness light Christian",
+    "البحر": "Sea of Galilee biblical",
+    "العاصفة": "storm sea boat",
+    "السفينة": "biblical boat sea",
+    "الجبل": "biblical mountain landscape",
+    "الكنيسة": "Christian church interior",
+    "كنيسة": "Christian church interior",
+    "القداس": "Christian church worship",
+    "الملاك": "angel Christian art",
+    "ملاك": "angel Christian art",
+    "السماء": "heaven clouds sunlight",
+    "السما": "heaven clouds sunlight",
+    "القيود": "chains freedom Christian",
+    "حرية": "freedom sunrise landscape",
+    "الوحدة": "loneliness person landscape",
+    "الحزن": "sadness hope sunrise",
+    "حزين": "sadness hope sunrise",
+    "الشفاء": "healing prayer Christian",
+    "شفاء": "healing prayer Christian",
+}
 
 
 def run(command):
@@ -41,8 +123,7 @@ def run(command):
 def check_arabic_support():
     if not features.check_feature("raqm"):
         raise RuntimeError(
-            "Arabic text rendering requires Pillow with libraqm support. "
-            "Install libraqm and rebuild Pillow in the workflow."
+            "Arabic text rendering requires Pillow with libraqm support."
         )
 
 
@@ -76,9 +157,7 @@ def get_font(size):
             layout_engine=ImageFont.Layout.RAQM
         )
 
-    raise RuntimeError(
-        "Arabic font not found. Install fonts-noto-core."
-    )
+    raise RuntimeError("Arabic font not found.")
 
 
 def elevenlabs_request(url, api_key, method="GET", payload=None):
@@ -196,9 +275,7 @@ def choose_arabic_voice(api_key):
 
     if not candidates:
         raise RuntimeError(
-            "No Arabic voice verified for this account was found. "
-            "Choose an Arabic voice available in your account and "
-            "add its ID as ELEVENLABS_VOICE_ID in GitHub Secrets."
+            "No Arabic voice verified for this account was found."
         )
 
     selected = candidates[0]
@@ -307,6 +384,7 @@ def clean_script(script):
 
 def split_scenes(text):
     sentences = re.split(r"(?<=[.!؟?])\s+", text)
+
     sentences = [
         sentence.strip()
         for sentence in sentences
@@ -323,16 +401,16 @@ def split_scenes(text):
         ]
 
     count = min(6, max(3, math.ceil(len(sentences) / 2)))
-    scenes = [[] for _ in range(count)]
+    chunk_size = math.ceil(len(sentences) / count)
 
-    for index, sentence in enumerate(sentences):
-        scenes[index % count].append(sentence)
+    scenes = []
 
-    return [
-        " ".join(part)
-        for part in scenes
-        if part
-    ]
+    for i in range(0, len(sentences), chunk_size):
+        scenes.append(
+            " ".join(sentences[i:i + chunk_size])
+        )
+
+    return scenes
 
 
 def wrap_text(draw, text, font, max_width):
@@ -364,95 +442,225 @@ def wrap_text(draw, text, font, max_width):
     return lines
 
 
-def make_background(index, text):
+def clean_metadata(value):
+    if not value:
+        return ""
+
+    value = html.unescape(str(value))
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = re.sub(r"\s+", " ", value)
+
+    return value.strip()
+
+
+def commons_request(params):
+    query = urllib.parse.urlencode(params)
+
+    request = urllib.request.Request(
+        f"{COMMONS_API}?{query}",
+        headers={
+            "User-Agent": COMMONS_USER_AGENT,
+            "Accept": "application/json"
+        }
+    )
+
+    with urllib.request.urlopen(request, timeout=35) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def image_search_query(scene_text, topic):
+    combined = f"{topic} {scene_text}".lower()
+
+    matches = []
+
+    for arabic_word, english_query in IMAGE_KEYWORDS.items():
+        if arabic_word.lower() in combined:
+            if english_query not in matches:
+                matches.append(english_query)
+
+    if matches:
+        return matches[0]
+
+    return "Jesus Christ Bible Christian prayer"
+
+
+def allowed_license(license_name):
+    license_name = (license_name or "").lower()
+
+    allowed_terms = (
+        "public domain",
+        "cc0",
+        "cc by ",
+        "cc-by ",
+        "cc by-sa",
+        "cc-by-sa"
+    )
+
+    return any(term in license_name for term in allowed_terms)
+
+
+def search_commons_image(scene_text, topic, used_titles):
+    search_term = image_search_query(scene_text, topic)
+
+    print("Searching Wikimedia Commons:", search_term)
+
+    params = {
+        "action": "query",
+        "format": "json",
+        "generator": "search",
+        "gsrsearch": search_term,
+        "gsrnamespace": 6,
+        "gsrlimit": 12,
+        "prop": "imageinfo",
+        "iiprop": "url|extmetadata|size|mime",
+        "iiurlwidth": 1400
+    }
+
+    try:
+        data = commons_request(params)
+
+        pages = data.get("query", {}).get("pages", {})
+
+        for page in pages.values():
+            title = page.get("title", "")
+
+            if not title or title in used_titles:
+                continue
+
+            image_info_list = page.get("imageinfo", [])
+
+            if not image_info_list:
+                continue
+
+            info = image_info_list[0]
+
+            mime = info.get("mime", "")
+
+            if not mime.startswith("image/"):
+                continue
+
+            width = info.get("width", 0)
+            height = info.get("height", 0)
+
+            if width < 600 or height < 400:
+                continue
+
+            ext = info.get("extmetadata", {})
+
+            license_name = clean_metadata(
+                ext.get("LicenseShortName", {}).get("value", "")
+            )
+
+            if not allowed_license(license_name):
+                continue
+
+            image_url = info.get("thumburl") or info.get("url")
+
+            if not image_url:
+                continue
+
+            author = clean_metadata(
+                ext.get("Attribution", {}).get("value", "")
+                or ext.get("Artist", {}).get("value", "")
+                or "Unknown author"
+            )
+
+            image_title = clean_metadata(
+                ext.get("ObjectName", {}).get("value", "")
+                or title.replace("File:", "")
+            )
+
+            description_url = info.get(
+                "descriptionurl",
+                "https://commons.wikimedia.org/"
+            )
+
+            return {
+                "title": image_title,
+                "author": author,
+                "license": license_name,
+                "source": description_url,
+                "url": image_url,
+                "commons_title": title
+            }
+
+    except Exception as error:
+        print("Wikimedia search unavailable:", str(error))
+
+    return None
+
+
+def download_image(image_url, destination):
+    request = urllib.request.Request(
+        image_url,
+        headers={
+            "User-Agent": COMMONS_USER_AGENT
+        }
+    )
+
+    with urllib.request.urlopen(request, timeout=45) as response:
+        content = response.read()
+
+    if not content:
+        raise RuntimeError("Downloaded image is empty.")
+
+    destination.write_bytes(content)
+
+    image = Image.open(destination)
+    image.verify()
+
+    return True
+
+
+def make_fallback_background():
     image = Image.new("RGB", (WIDTH, HEIGHT))
     pixels = image.load()
 
-    palettes = [
-        ((8, 17, 38), (31, 65, 104)),
-        ((13, 22, 42), (82, 65, 83)),
-        ((12, 28, 43), (38, 91, 96)),
-        ((25, 20, 43), (91, 68, 82)),
-        ((8, 24, 39), (65, 78, 102)),
-        ((17, 20, 38), (77, 58, 90))
-    ]
-
-    top, bottom = palettes[index % len(palettes)]
+    top = (9, 19, 38)
+    bottom = (35, 47, 66)
 
     for y in range(HEIGHT):
         ratio = y / HEIGHT
 
         color = tuple(
-            int(
-                top[c] * (1 - ratio)
-                + bottom[c] * ratio
-            )
+            int(top[c] * (1 - ratio) + bottom[c] * ratio)
             for c in range(3)
         )
 
         for x in range(WIDTH):
             pixels[x, y] = color
 
-    draw = ImageDraw.Draw(image, "RGBA")
+    return image
 
-    for radius in range(500, 80, -35):
-        alpha = max(2, 18 - radius // 40)
 
-        draw.ellipse(
-            (
-                WIDTH // 2 - radius,
-                390 - radius,
-                WIDTH // 2 + radius,
-                390 + radius
-            ),
-            outline=(255, 225, 174, alpha),
-            width=3
-        )
+def add_scene_text(image, text):
+    image = image.convert("RGBA")
 
-    draw.polygon(
-        [
-            (WIDTH // 2 - 30, 0),
-            (WIDTH // 2 + 30, 0),
-            (WIDTH // 2 + 430, 1150),
-            (WIDTH // 2 - 430, 1150)
-        ],
-        fill=(255, 238, 205, 12)
+    overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+
+    overlay_draw.rectangle(
+        (0, 0, WIDTH, 340),
+        fill=(0, 0, 0, 55)
     )
 
-    draw.polygon(
-        [
-            (0, 1320),
-            (220, 1120),
-            (450, 1320),
-            (700, 1080),
-            (1080, 1350),
-            (1080, 1920),
-            (0, 1920)
-        ],
-        fill=(5, 12, 27, 170)
+    overlay_draw.rectangle(
+        (0, 950, WIDTH, HEIGHT),
+        fill=(0, 0, 0, 145)
     )
 
-    draw.line(
-        (70, 250, WIDTH - 70, 250),
-        fill=(235, 210, 160, 110),
-        width=2
-    )
-
-    draw.line(
-        (70, 1650, WIDTH - 70, 1650),
-        fill=(235, 210, 160, 110),
-        width=2
-    )
+    image = Image.alpha_composite(image, overlay)
+    draw = ImageDraw.Draw(image)
 
     font = get_font(58)
-    lines = wrap_text(draw, text, font, 850)
+    lines = wrap_text(draw, text, font, 900)
 
     if len(lines) > 6:
         lines = lines[:6]
 
-    line_height = 105
+    line_height = 100
     total_height = len(lines) * line_height
-    start_y = (HEIGHT - total_height) // 2
+    start_y = 1110 + max(0, (520 - total_height) // 2)
 
     for line_index, line in enumerate(lines):
         box = draw.textbbox(
@@ -471,7 +679,7 @@ def make_background(index, text):
             (x + 3, y + 5),
             line,
             font=font,
-            fill=(0, 0, 0, 180),
+            fill=(0, 0, 0, 220),
             direction="rtl",
             language="ar"
         )
@@ -480,22 +688,106 @@ def make_background(index, text):
             (x, y),
             line,
             font=font,
-            fill=(255, 248, 230, 255),
+            fill=(255, 250, 235, 255),
             direction="rtl",
             language="ar"
         )
 
-    small_font = get_font(32)
+    return image.convert("RGB")
+
+
+def add_image_credit(image, image_info):
+    if not image_info:
+        return image
+
+    image = image.convert("RGBA")
+    draw = ImageDraw.Draw(image, "RGBA")
+
+    draw.rectangle(
+        (0, 1835, WIDTH, HEIGHT),
+        fill=(0, 0, 0, 175)
+    )
+
+    font = get_font(19)
+
+    title = image_info.get("title", "Image")
+    author = image_info.get("author", "Unknown author")
+    license_name = image_info.get("license", "License not specified")
+
+    line_one = f"Image: {title[:65]} | {author[:65]}"
+    line_two = (
+        f"Wikimedia Commons | {license_name} | Cropped for video"
+    )
 
     draw.text(
-        (WIDTH // 2, 1770),
-        "الكتاب المقدس مسموع",
-        font=small_font,
-        fill=(232, 215, 179, 220),
+        (WIDTH // 2, 1865),
+        line_one,
+        font=font,
+        fill=(255, 255, 255, 235),
         anchor="mm",
-        direction="rtl",
-        language="ar"
+        direction="ltr",
+        language="en"
     )
+
+    draw.text(
+        (WIDTH // 2, 1905),
+        line_two,
+        font=font,
+        fill=(230, 220, 200, 235),
+        anchor="mm",
+        direction="ltr",
+        language="en"
+    )
+
+    return image.convert("RGB")
+
+
+def make_scene_image(index, scene_text, topic, used_titles):
+    image_info = search_commons_image(
+        scene_text,
+        topic,
+        used_titles
+    )
+
+    if image_info:
+        image_path = WORK / f"source_{index:02d}.img"
+
+        try:
+            download_image(
+                image_info["url"],
+                image_path
+            )
+
+            with Image.open(image_path) as source:
+                source = source.convert("RGB")
+
+                image = ImageOps.fit(
+                    source,
+                    (WIDTH, HEIGHT),
+                    method=Image.Resampling.LANCZOS,
+                    centering=(0.5, 0.42)
+                )
+
+            used_titles.add(image_info["commons_title"])
+
+            print(
+                "Using image:",
+                image_info["title"],
+                "|",
+                image_info["license"]
+            )
+
+        except Exception as error:
+            print("Image download failed:", str(error))
+            image = make_fallback_background()
+            image_info = None
+
+    else:
+        print("No suitable licensed image found; using fallback.")
+        image = make_fallback_background()
+
+    image = add_scene_text(image, scene_text)
+    image = add_image_credit(image, image_info)
 
     return image
 
@@ -577,6 +869,7 @@ def main():
     print(f"Scenes: {len(scenes)}")
 
     clip_paths = []
+    used_titles = set()
 
     for index, scene in enumerate(scenes):
         print(
@@ -586,9 +879,11 @@ def main():
         image_path = WORK / f"scene_{index:02d}.png"
         clip_path = WORK / f"clip_{index:02d}.mp4"
 
-        make_background(
+        make_scene_image(
             index,
-            scene
+            scene,
+            topic,
+            used_titles
         ).save(image_path)
 
         render_scene(
