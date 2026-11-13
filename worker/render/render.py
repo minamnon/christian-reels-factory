@@ -1,11 +1,9 @@
-
 import json
 import math
 import os
 import re
 import html
 import subprocess
-import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -16,10 +14,6 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps, features
 WIDTH = 1080
 HEIGHT = 1920
 FPS = 30
-
-VOICE_MODEL = "eleven_multilingual_v2"
-API_BASE = "https://api.elevenlabs.io/v1"
-VOICES_URL = "https://api.elevenlabs.io/v2/voices"
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 COMMONS_USER_AGENT = (
@@ -34,9 +28,6 @@ WORK = ROOT / "render_work"
 OUTPUT.mkdir(exist_ok=True)
 WORK.mkdir(exist_ok=True)
 
-
-# كلمات عربية تساعد على اختيار صور مناسبة للمشهد.
-# يمكن إضافة كلمات جديدة لاحقًا حسب موضوعات الريلز.
 
 IMAGE_KEYWORDS = {
     "غفران": "forgiveness Christian prayer",
@@ -160,182 +151,6 @@ def get_font(size):
     raise RuntimeError("Arabic font not found.")
 
 
-def elevenlabs_request(url, api_key, method="GET", payload=None):
-    headers = {
-        "xi-api-key": api_key,
-        "Accept": "application/json"
-    }
-
-    data = None
-
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-
-    request = urllib.request.Request(
-        url,
-        data=data,
-        headers=headers,
-        method=method
-    )
-
-    try:
-        with urllib.request.urlopen(request, timeout=90) as response:
-            return response.read()
-
-    except urllib.error.HTTPError as error:
-        details = error.read().decode("utf-8", errors="replace")
-
-        if error.code == 401:
-            raise RuntimeError(
-                "ElevenLabs API key is invalid or unauthorized."
-            )
-
-        if error.code == 402:
-            raise RuntimeError(
-                "ElevenLabs account has insufficient credits. "
-                "No paid fallback will be used."
-            )
-
-        if error.code == 429:
-            raise RuntimeError(
-                "ElevenLabs free usage limit or rate limit reached. "
-                "Wait for the limit to reset."
-            )
-
-        raise RuntimeError(
-            f"ElevenLabs API error {error.code}: {details[:1000]}"
-        )
-
-    except urllib.error.URLError as error:
-        raise RuntimeError(
-            f"Cannot connect to ElevenLabs: {error.reason}"
-        )
-
-
-def choose_arabic_voice(api_key):
-    configured_voice = os.environ.get(
-        "ELEVENLABS_VOICE_ID", ""
-    ).strip()
-
-    if configured_voice:
-        print("Using configured ElevenLabs voice ID.")
-        return configured_voice
-
-    query = urllib.parse.urlencode({
-        "language": "ar",
-        "page_size": 100
-    })
-
-    raw = elevenlabs_request(
-        f"{VOICES_URL}?{query}",
-        api_key
-    )
-
-    data = json.loads(raw.decode("utf-8"))
-    voices = data.get("voices", [])
-
-    candidates = []
-
-    for voice in voices:
-        voice_id = voice.get("voice_id")
-
-        if not voice_id:
-            continue
-
-        verified = voice.get("verified_languages", [])
-
-        for language in verified:
-            language_name = str(
-                language.get("language", "")
-            ).lower()
-
-            language_id = str(
-                language.get("language_id", "")
-            ).lower()
-
-            model_ids = language.get("model_id", [])
-
-            if isinstance(model_ids, str):
-                model_ids = [model_ids]
-
-            supports_model = (
-                not model_ids
-                or VOICE_MODEL in model_ids
-            )
-
-            is_arabic = (
-                "arabic" in language_name
-                or language_id == "ar"
-            )
-
-            if is_arabic and supports_model:
-                candidates.append(voice)
-                break
-
-    if not candidates:
-        raise RuntimeError(
-            "No Arabic voice verified for this account was found."
-        )
-
-    selected = candidates[0]
-
-    print(
-        "Selected Arabic voice:",
-        selected.get("name", "Arabic voice")
-    )
-
-    return selected["voice_id"]
-
-
-def create_voice(text, destination):
-    api_key = os.environ.get(
-        "ELEVENLABS_API_KEY", ""
-    ).strip()
-
-    if not api_key:
-        raise RuntimeError(
-            "Missing ELEVENLABS_API_KEY GitHub Secret."
-        )
-
-    voice_id = choose_arabic_voice(api_key)
-
-    payload = {
-        "text": text,
-        "model_id": VOICE_MODEL,
-        "voice_settings": {
-            "stability": 0.55,
-            "similarity_boost": 0.75,
-            "style": 0.15,
-            "use_speaker_boost": True
-        }
-    }
-
-    url = (
-        f"{API_BASE}/text-to-speech/"
-        f"{urllib.parse.quote(voice_id, safe='')}"
-        "?output_format=mp3_44100_128"
-    )
-
-    print("Generating narration with ElevenLabs...")
-
-    audio = elevenlabs_request(
-        url,
-        api_key,
-        method="POST",
-        payload=payload
-    )
-
-    if not audio:
-        raise RuntimeError(
-            "ElevenLabs returned an empty audio file."
-        )
-
-    destination.write_bytes(audio)
-
-    print("ElevenLabs narration saved.")
-
-
 def clean_script(script):
     ignored = (
         "عنوان الريل",
@@ -376,7 +191,7 @@ def clean_script(script):
 
     if len(text) < 30:
         raise ValueError(
-            "The script does not contain enough narration text."
+            "The script does not contain enough text."
         )
 
     return text
@@ -471,15 +286,9 @@ def commons_request(params):
 def image_search_query(scene_text, topic):
     combined = f"{topic} {scene_text}".lower()
 
-    matches = []
-
     for arabic_word, english_query in IMAGE_KEYWORDS.items():
         if arabic_word.lower() in combined:
-            if english_query not in matches:
-                matches.append(english_query)
-
-    if matches:
-        return matches[0]
+            return english_query
 
     return "Jesus Christ Bible Christian prayer"
 
@@ -518,7 +327,6 @@ def search_commons_image(scene_text, topic, used_titles):
 
     try:
         data = commons_request(params)
-
         pages = data.get("query", {}).get("pages", {})
 
         for page in pages.values():
@@ -533,7 +341,6 @@ def search_commons_image(scene_text, topic, used_titles):
                 continue
 
             info = image_info_list[0]
-
             mime = info.get("mime", "")
 
             if not mime.startswith("image/"):
@@ -606,8 +413,8 @@ def download_image(image_url, destination):
 
     destination.write_bytes(content)
 
-    image = Image.open(destination)
-    image.verify()
+    with Image.open(destination) as image:
+        image.verify()
 
     return True
 
@@ -636,7 +443,12 @@ def make_fallback_background():
 def add_scene_text(image, text):
     image = image.convert("RGBA")
 
-    overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    overlay = Image.new(
+        "RGBA",
+        (WIDTH, HEIGHT),
+        (0, 0, 0, 0)
+    )
+
     overlay_draw = ImageDraw.Draw(overlay)
 
     overlay_draw.rectangle(
@@ -792,23 +604,6 @@ def make_scene_image(index, scene_text, topic, used_titles):
     return image
 
 
-def audio_duration(path):
-    result = subprocess.run(
-        [
-            "ffprobe",
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            str(path)
-        ],
-        capture_output=True,
-        text=True,
-        check=True
-    )
-
-    return float(result.stdout.strip())
-
-
 def render_scene(image_path, duration, output_path):
     frames = max(
         1,
@@ -845,27 +640,38 @@ def main():
         "REEL_TOPIC", "رسالة روحية"
     ).strip()
 
+    duration_text = os.environ.get(
+        "REEL_DURATION", "35"
+    ).strip()
+
     if not script:
         raise ValueError("REEL_SCRIPT is empty.")
+
+    try:
+        total_duration = float(duration_text)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "REEL_DURATION must be a number of seconds."
+        )
+
+    if total_duration < 5 or total_duration > 180:
+        raise ValueError(
+            "REEL_DURATION must be between 5 and 180 seconds."
+        )
 
     check_arabic_support()
 
     narration = clean_script(script)
     scenes = split_scenes(narration)
 
-    voice_path = WORK / "narration.mp3"
+    if not scenes:
+        raise ValueError("No scenes could be created from the script.")
 
-    print("Preparing Arabic narration...")
-
-    create_voice(
-        narration,
-        voice_path
-    )
-
-    total_duration = audio_duration(voice_path)
     scene_duration = total_duration / len(scenes)
 
-    print(f"Audio duration: {total_duration:.1f} seconds")
+    print("Silent video mode enabled.")
+    print("ElevenLabs will not be called.")
+    print(f"Target duration: {total_duration:.1f} seconds")
     print(f"Scenes: {len(scenes)}")
 
     clip_paths = []
@@ -888,7 +694,7 @@ def main():
 
         render_scene(
             image_path,
-            scene_duration + 0.15,
+            scene_duration,
             clip_path
         )
 
@@ -905,17 +711,6 @@ def main():
                 f"file '{clip.resolve()}'\n"
             )
 
-    silent_video = WORK / "silent.mp4"
-
-    run([
-        "ffmpeg", "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", str(concat_file),
-        "-c", "copy",
-        str(silent_video)
-    ])
-
     safe_topic = re.sub(
         r"[^a-zA-Z0-9_-]+",
         "-",
@@ -925,26 +720,27 @@ def main():
     if not safe_topic:
         safe_topic = "christian-reel"
 
-    final_path = OUTPUT / f"{safe_topic[:35]}.mp4"
+    final_path = OUTPUT / f"{safe_topic[:35]}-silent.mp4"
 
-    print("Combining video and narration...")
+    print("Joining silent video scenes...")
 
     run([
         "ffmpeg", "-y",
-        "-i", str(silent_video),
-        "-i", str(voice_path),
-        "-map", "0:v:0",
-        "-map", "1:a:0",
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-shortest",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", str(concat_file),
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-pix_fmt", "yuv420p",
+        "-an",
         "-movflags", "+faststart",
         str(final_path)
     ])
 
     print(f"SUCCESS: {final_path}")
-    print(f"Duration: {total_duration:.1f} seconds")
+    print(
+        f"Silent video duration target: {total_duration:.1f} seconds"
+    )
 
 
 if __name__ == "__main__":
