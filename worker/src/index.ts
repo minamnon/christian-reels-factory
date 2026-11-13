@@ -1,7 +1,6 @@
 
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
-import { z } from "zod";
 
 function createServer() {
   const server = new McpServer({
@@ -12,9 +11,8 @@ function createServer() {
   server.registerTool(
     "project_status",
     {
-      description:
-        "Check the status of the Christian Reels Factory project.",
-      inputSchema: z.object({}),
+      description: "Check the project status.",
+      inputSchema: {},
     },
     async () => ({
       content: [
@@ -35,4 +33,4 @@ export default {
   fetch(request, env, ctx) {
     return handler(request, env, ctx);
   },
-};
+} satisfies ExportedHandler;
