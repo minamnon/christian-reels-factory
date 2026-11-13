@@ -12,10 +12,8 @@ function createServer() {
     "project_status",
     {
       description: "Check the project status.",
-      inputSchema: {},
     },
-    async () => ({
-      resultType: "complete",
+    async (_ctx) => ({
       content: [
         {
           type: "text",
