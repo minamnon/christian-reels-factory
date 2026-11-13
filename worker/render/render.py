@@ -1,22 +1,24 @@
 
-import asyncio
+import json
 import math
 import os
 import re
-import shutil
 import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
-import edge_tts
-from PIL import Image, ImageDraw, ImageFont
-import arabic_reshaper
-from bidi.algorithm import get_display
+from PIL import Image, ImageDraw, ImageFont, features
 
 
 WIDTH = 1080
 HEIGHT = 1920
 FPS = 30
-VOICE = "ar-EG-SalmaNeural"
+
+VOICE_MODEL = "eleven_multilingual_v2"
+API_BASE = "https://api.elevenlabs.io/v1"
+VOICES_URL = "https://api.elevenlabs.io/v2/voices"
 
 ROOT = Path.cwd()
 OUTPUT = ROOT / "output"
@@ -36,19 +38,28 @@ def run(command):
     )
 
 
-def shape_arabic(text):
-    return get_display(arabic_reshaper.reshape(text))
+def check_arabic_support():
+    if not features.check_feature("raqm"):
+        raise RuntimeError(
+            "Arabic text rendering requires Pillow with libraqm support. "
+            "Install libraqm and rebuild Pillow in the workflow."
+        )
 
 
 def get_font(size):
     candidates = [
         "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     ]
 
     for path in candidates:
         if Path(path).exists():
-            return ImageFont.truetype(path, size)
+            return ImageFont.truetype(
+                path,
+                size,
+                layout_engine=ImageFont.Layout.RAQM
+            )
 
     result = subprocess.run(
         ["fc-match", "-f", "%{file}", "Noto Naskh Arabic"],
@@ -57,10 +68,195 @@ def get_font(size):
     )
 
     path = result.stdout.strip()
-    if path and Path(path).exists():
-        return ImageFont.truetype(path, size)
 
-    return ImageFont.load_default()
+    if path and Path(path).exists():
+        return ImageFont.truetype(
+            path,
+            size,
+            layout_engine=ImageFont.Layout.RAQM
+        )
+
+    raise RuntimeError(
+        "Arabic font not found. Install fonts-noto-core."
+    )
+
+
+def elevenlabs_request(url, api_key, method="GET", payload=None):
+    headers = {
+        "xi-api-key": api_key,
+        "Accept": "application/json"
+    }
+
+    data = None
+
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers=headers,
+        method=method
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            return response.read()
+
+    except urllib.error.HTTPError as error:
+        details = error.read().decode("utf-8", errors="replace")
+
+        if error.code == 401:
+            raise RuntimeError(
+                "ElevenLabs API key is invalid or unauthorized."
+            )
+
+        if error.code == 402:
+            raise RuntimeError(
+                "ElevenLabs account has insufficient credits. "
+                "No paid fallback will be used."
+            )
+
+        if error.code == 429:
+            raise RuntimeError(
+                "ElevenLabs free usage limit or rate limit reached. "
+                "Wait for the limit to reset."
+            )
+
+        raise RuntimeError(
+            f"ElevenLabs API error {error.code}: {details[:1000]}"
+        )
+
+    except urllib.error.URLError as error:
+        raise RuntimeError(
+            f"Cannot connect to ElevenLabs: {error.reason}"
+        )
+
+
+def choose_arabic_voice(api_key):
+    configured_voice = os.environ.get(
+        "ELEVENLABS_VOICE_ID", ""
+    ).strip()
+
+    if configured_voice:
+        print("Using configured ElevenLabs voice ID.")
+        return configured_voice
+
+    query = urllib.parse.urlencode({
+        "language": "ar",
+        "page_size": 100
+    })
+
+    raw = elevenlabs_request(
+        f"{VOICES_URL}?{query}",
+        api_key
+    )
+
+    data = json.loads(raw.decode("utf-8"))
+    voices = data.get("voices", [])
+
+    candidates = []
+
+    for voice in voices:
+        voice_id = voice.get("voice_id")
+
+        if not voice_id:
+            continue
+
+        verified = voice.get("verified_languages", [])
+
+        for language in verified:
+            language_name = str(
+                language.get("language", "")
+            ).lower()
+
+            language_id = str(
+                language.get("language_id", "")
+            ).lower()
+
+            model_ids = language.get("model_id", [])
+
+            if isinstance(model_ids, str):
+                model_ids = [model_ids]
+
+            supports_model = (
+                not model_ids
+                or VOICE_MODEL in model_ids
+            )
+
+            is_arabic = (
+                "arabic" in language_name
+                or language_id == "ar"
+            )
+
+            if is_arabic and supports_model:
+                candidates.append(voice)
+                break
+
+    if not candidates:
+        raise RuntimeError(
+            "No Arabic voice verified for this account was found. "
+            "Choose an Arabic voice available in your account and "
+            "add its ID as ELEVENLABS_VOICE_ID in GitHub Secrets."
+        )
+
+    selected = candidates[0]
+
+    print(
+        "Selected Arabic voice:",
+        selected.get("name", "Arabic voice")
+    )
+
+    return selected["voice_id"]
+
+
+def create_voice(text, destination):
+    api_key = os.environ.get(
+        "ELEVENLABS_API_KEY", ""
+    ).strip()
+
+    if not api_key:
+        raise RuntimeError(
+            "Missing ELEVENLABS_API_KEY GitHub Secret."
+        )
+
+    voice_id = choose_arabic_voice(api_key)
+
+    payload = {
+        "text": text,
+        "model_id": VOICE_MODEL,
+        "voice_settings": {
+            "stability": 0.55,
+            "similarity_boost": 0.75,
+            "style": 0.15,
+            "use_speaker_boost": True
+        }
+    }
+
+    url = (
+        f"{API_BASE}/text-to-speech/"
+        f"{urllib.parse.quote(voice_id, safe='')}"
+        "?output_format=mp3_44100_128"
+    )
+
+    print("Generating narration with ElevenLabs...")
+
+    audio = elevenlabs_request(
+        url,
+        api_key,
+        method="POST",
+        payload=payload
+    )
+
+    if not audio:
+        raise RuntimeError(
+            "ElevenLabs returned an empty audio file."
+        )
+
+    destination.write_bytes(audio)
+
+    print("ElevenLabs narration saved.")
 
 
 def clean_script(script):
@@ -76,6 +272,7 @@ def clean_script(script):
 
     for raw in script.splitlines():
         line = raw.strip()
+
         if not line:
             continue
 
@@ -101,18 +298,25 @@ def clean_script(script):
     text = re.sub(r"\s+", " ", text).strip()
 
     if len(text) < 30:
-        raise ValueError("The script does not contain enough narration text.")
+        raise ValueError(
+            "The script does not contain enough narration text."
+        )
 
     return text
 
 
 def split_scenes(text):
     sentences = re.split(r"(?<=[.!؟?])\s+", text)
-    sentences = [s.strip() for s in sentences if len(s.strip()) > 8]
+    sentences = [
+        sentence.strip()
+        for sentence in sentences
+        if len(sentence.strip()) > 8
+    ]
 
     if len(sentences) < 2:
         words = text.split()
         size = max(1, math.ceil(len(words) / 4))
+
         sentences = [
             " ".join(words[i:i + size])
             for i in range(0, len(words), size)
@@ -124,7 +328,11 @@ def split_scenes(text):
     for index, sentence in enumerate(sentences):
         scenes[index % count].append(sentence)
 
-    return [" ".join(part) for part in scenes if part]
+    return [
+        " ".join(part)
+        for part in scenes
+        if part
+    ]
 
 
 def wrap_text(draw, text, font, max_width):
@@ -134,13 +342,20 @@ def wrap_text(draw, text, font, max_width):
 
     for word in words:
         test = f"{current} {word}".strip()
-        visual = shape_arabic(test)
 
-        if draw.textlength(visual, font=font) <= max_width:
+        width = draw.textlength(
+            test,
+            font=font,
+            direction="rtl",
+            language="ar"
+        )
+
+        if width <= max_width:
             current = test
         else:
             if current:
                 lines.append(current)
+
             current = word
 
     if current:
@@ -166,8 +381,12 @@ def make_background(index, text):
 
     for y in range(HEIGHT):
         ratio = y / HEIGHT
+
         color = tuple(
-            int(top[c] * (1 - ratio) + bottom[c] * ratio)
+            int(
+                top[c] * (1 - ratio)
+                + bottom[c] * ratio
+            )
             for c in range(3)
         )
 
@@ -176,9 +395,9 @@ def make_background(index, text):
 
     draw = ImageDraw.Draw(image, "RGBA")
 
-    # Soft cinematic light circles
     for radius in range(500, 80, -35):
         alpha = max(2, 18 - radius // 40)
+
         draw.ellipse(
             (
                 WIDTH // 2 - radius,
@@ -190,7 +409,6 @@ def make_background(index, text):
             width=3
         )
 
-    # Light beam
     draw.polygon(
         [
             (WIDTH // 2 - 30, 0),
@@ -201,7 +419,6 @@ def make_background(index, text):
         fill=(255, 238, 205, 12)
     )
 
-    # Distant hills
     draw.polygon(
         [
             (0, 1320),
@@ -227,7 +444,6 @@ def make_background(index, text):
         width=2
     )
 
-    # Scene text
     font = get_font(58)
     lines = wrap_text(draw, text, font, 850)
 
@@ -239,48 +455,49 @@ def make_background(index, text):
     start_y = (HEIGHT - total_height) // 2
 
     for line_index, line in enumerate(lines):
-        visual = shape_arabic(line)
-        box = draw.textbbox((0, 0), visual, font=font)
-        text_width = box[2] - box[0]
+        box = draw.textbbox(
+            (0, 0),
+            line,
+            font=font,
+            direction="rtl",
+            language="ar"
+        )
 
+        text_width = box[2] - box[0]
         x = (WIDTH - text_width) // 2
         y = start_y + line_index * line_height
 
         draw.text(
             (x + 3, y + 5),
-            visual,
+            line,
             font=font,
-            fill=(0, 0, 0, 180)
+            fill=(0, 0, 0, 180),
+            direction="rtl",
+            language="ar"
         )
 
         draw.text(
             (x, y),
-            visual,
+            line,
             font=font,
-            fill=(255, 248, 230, 255)
+            fill=(255, 248, 230, 255),
+            direction="rtl",
+            language="ar"
         )
 
     small_font = get_font(32)
-    brand = shape_arabic("الكتاب المقدس مسموع")
+
     draw.text(
         (WIDTH // 2, 1770),
-        brand,
+        "الكتاب المقدس مسموع",
         font=small_font,
         fill=(232, 215, 179, 220),
-        anchor="mm"
+        anchor="mm",
+        direction="rtl",
+        language="ar"
     )
 
     return image
-
-
-async def create_voice(text, destination):
-    communicate = edge_tts.Communicate(
-        text,
-        VOICE,
-        rate="+0%",
-        volume="+0%"
-    )
-    await communicate.save(str(destination))
 
 
 def audio_duration(path):
@@ -296,11 +513,15 @@ def audio_duration(path):
         text=True,
         check=True
     )
+
     return float(result.stdout.strip())
 
 
 def render_scene(image_path, duration, output_path):
-    frames = max(1, int(math.ceil(duration * FPS)))
+    frames = max(
+        1,
+        int(math.ceil(duration * FPS))
+    )
 
     video_filter = (
         f"zoompan=z='min(zoom+0.00035,1.08)':"
@@ -324,19 +545,30 @@ def render_scene(image_path, duration, output_path):
 
 
 def main():
-    script = os.environ.get("REEL_SCRIPT", "").strip()
-    topic = os.environ.get("REEL_TOPIC", "رسالة روحية").strip()
+    script = os.environ.get(
+        "REEL_SCRIPT", ""
+    ).strip()
+
+    topic = os.environ.get(
+        "REEL_TOPIC", "رسالة روحية"
+    ).strip()
 
     if not script:
         raise ValueError("REEL_SCRIPT is empty.")
+
+    check_arabic_support()
 
     narration = clean_script(script)
     scenes = split_scenes(narration)
 
     voice_path = WORK / "narration.mp3"
 
-    print("Generating Arabic narration...")
-    asyncio.run(create_voice(narration, voice_path))
+    print("Preparing Arabic narration...")
+
+    create_voice(
+        narration,
+        voice_path
+    )
 
     total_duration = audio_duration(voice_path)
     scene_duration = total_duration / len(scenes)
@@ -347,12 +579,17 @@ def main():
     clip_paths = []
 
     for index, scene in enumerate(scenes):
-        print(f"Creating scene {index + 1}/{len(scenes)}...")
+        print(
+            f"Creating scene {index + 1}/{len(scenes)}..."
+        )
 
         image_path = WORK / f"scene_{index:02d}.png"
         clip_path = WORK / f"clip_{index:02d}.mp4"
 
-        make_background(index, scene).save(image_path)
+        make_background(
+            index,
+            scene
+        ).save(image_path)
 
         render_scene(
             image_path,
@@ -364,9 +601,14 @@ def main():
 
     concat_file = WORK / "concat.txt"
 
-    with concat_file.open("w", encoding="utf-8") as file:
+    with concat_file.open(
+        "w",
+        encoding="utf-8"
+    ) as file:
         for clip in clip_paths:
-            file.write(f"file '{clip.resolve()}'\n")
+            file.write(
+                f"file '{clip.resolve()}'\n"
+            )
 
     silent_video = WORK / "silent.mp4"
 
@@ -379,7 +621,12 @@ def main():
         str(silent_video)
     ])
 
-    safe_topic = re.sub(r"[^a-zA-Z0-9_-]+", "-", topic).strip("-")
+    safe_topic = re.sub(
+        r"[^a-zA-Z0-9_-]+",
+        "-",
+        topic
+    ).strip("-")
+
     if not safe_topic:
         safe_topic = "christian-reel"
 
