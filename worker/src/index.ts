@@ -9,7 +9,6 @@ function createServer() {
     version: "0.2.0",
   });
 
-  // Tool 1: Project status
   server.registerTool(
     "project_status",
     {
@@ -25,22 +24,16 @@ function createServer() {
     })
   );
 
-  // Tool 2: Generate Arabic Christian Reel script
   server.registerTool(
     "generate_script",
     {
-      description:
-        "Generate a structured Arabic Christian Reel script.",
-      inputSchema: {
+      description: "Generate a structured Arabic Christian Reel script.",
+      inputSchema: z.object({
         topic: z.string().min(3).describe("Reel topic"),
-        bible_reference: z.string().optional().describe(
-          "Bible verse reference, if available"
-        ),
-        key_message: z.string().optional().describe(
-          "Main spiritual message"
-        ),
+        bible_reference: z.string().optional(),
+        key_message: z.string().optional(),
         duration_seconds: z.number().int().min(20).max(60).optional(),
-      },
+      }),
     },
     async ({
       topic,
@@ -67,26 +60,26 @@ function createServer() {
         : "يمكن إضافة مرجع كتابي موثوق يدعم موضوع الريل.";
 
       const script = [
-        "🎬 CHRISTIAN REEL SCRIPT",
+        "CHRISTIAN REEL SCRIPT",
         `الموضوع: ${topic}`,
         `المدة المستهدفة: ${duration} ثانية`,
         "",
-        "🎙️ البداية:",
+        "البداية:",
         hook,
         "",
-        "📖 الرسالة:",
+        "الرسالة:",
         body,
         "",
-        "❤️ التأمل:",
+        "التأمل:",
         reflection,
         "",
-        "✨ الخاتمة:",
+        "الخاتمة:",
         ending,
         "",
-        "📚 المرجع:",
+        "المرجع:",
         referenceLine,
         "",
-        "📝 وصف مقترح:",
+        "الوصف:",
         `${topic} | رسالة روحية قصيرة للتأمل والرجاء.`,
         "",
         "#الكتاب_المقدس_مسموع #تأملات_مسيحية #كلمة_الله",
