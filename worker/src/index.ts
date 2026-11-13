@@ -29,8 +29,10 @@ function createServer() {
   return server;
 }
 
+const handler = createMcpHandler(createServer);
+
 export default {
   fetch(request, env, ctx) {
-    return createMcpHandler(createServer)(request, env, ctx);
+    return handler(request, env, ctx);
   },
 };
