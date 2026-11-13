@@ -1,0 +1,5 @@
+
+edge-tts
+Pillow
+arabic-reshaper
+python-bidi
