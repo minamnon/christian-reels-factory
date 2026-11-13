@@ -8,16 +8,28 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps, features
+from PIL import (
+    Image,
+    ImageDraw,
+    ImageFont,
+    ImageOps,
+    ImageStat,
+    features
+)
 
+
+# =========================================================
+# SETTINGS
+# =========================================================
 
 WIDTH = 1080
 HEIGHT = 1920
 FPS = 30
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+
 COMMONS_USER_AGENT = (
-    "ChristianReelsFactory/1.0 "
+    "ChristianReelsFactory/2.0 "
     "(automated educational video production)"
 )
 
@@ -29,12 +41,16 @@ OUTPUT.mkdir(exist_ok=True)
 WORK.mkdir(exist_ok=True)
 
 
+# =========================================================
+# ARABIC KEYWORDS
+# =========================================================
+
 IMAGE_KEYWORDS = {
     "غفران": "forgiveness Christian prayer",
     "سامح": "forgiveness Christian prayer",
     "المسامحة": "forgiveness Christian prayer",
-    "محبة": "Christian love Jesus",
-    "الحب": "Christian love Jesus",
+    "محبة": "Christian love compassion",
+    "الحب": "Christian love compassion",
     "يسوع": "Jesus Christ",
     "المسيح": "Jesus Christ",
     "صلاة": "Christian prayer praying",
@@ -43,13 +59,13 @@ IMAGE_KEYWORDS = {
     "صليب": "Christian cross",
     "الصليب": "Christian cross",
     "رجاء": "Christian hope sunrise",
-    "الأمل": "Christian hope sunrise",
+    "الأمل": "hope sunrise landscape",
     "إيمان": "Christian faith Bible",
     "الايمان": "Christian faith Bible",
     "الخوف": "fear hope Christian",
-    "قلق": "anxiety prayer",
+    "قلق": "anxiety prayer Christian",
     "السلام": "peace Christian nature",
-    "سلام": "peace Christian nature",
+    "سلام": "peaceful nature sunrise",
     "نعمة": "Christian grace",
     "التوبة": "repentance Christian",
     "توبة": "repentance Christian",
@@ -68,7 +84,6 @@ IMAGE_KEYWORDS = {
     "الإنجيل": "Holy Bible",
     "الانجيل": "Holy Bible",
     "الراعي": "Good Shepherd Jesus sheep",
-    "خروف": "sheep shepherd",
     "الرحمة": "mercy Christian",
     "رحمة": "mercy Christian",
     "الصبر": "patience Christian prayer",
@@ -101,6 +116,66 @@ IMAGE_KEYWORDS = {
 }
 
 
+# =========================================================
+# SCENE-SPECIFIC IMAGE SEARCH
+# =========================================================
+
+SPECIAL_IMAGE_QUERIES = [
+    ("دموع", [
+        "person praying with tears",
+        "comfort sadness Christian prayer"
+    ]),
+    ("تعب", [
+        "person praying outdoors sunrise",
+        "Christian hope comfort"
+    ]),
+    ("انتظار", [
+        "sunrise waiting hope landscape",
+        "sunrise over mountains"
+    ]),
+    ("رجاء", [
+        "Christian hope sunrise landscape",
+        "sunrise golden light"
+    ]),
+    ("الأمل", [
+        "hope sunrise landscape",
+        "sunrise golden light"
+    ]),
+    ("إيمان", [
+        "hands holding Bible sunlight",
+        "open Bible warm light"
+    ]),
+    ("الايمان", [
+        "hands holding Bible sunlight",
+        "open Bible warm light"
+    ]),
+    ("تمسك", [
+        "hands holding cross Bible",
+        "hands praying Bible"
+    ]),
+    ("الظروف", [
+        "sunrise after storm landscape",
+        "calm sea sunrise"
+    ]),
+    ("محبة", [
+        "Jesus comforting person painting",
+        "Christian love compassion"
+    ]),
+    ("صلاة", [
+        "person praying hands sunlight",
+        "Christian prayer outdoors"
+    ]),
+    ("الصلاة", [
+        "person praying hands sunlight",
+        "Christian prayer outdoors"
+    ]),
+]
+
+
+# =========================================================
+# GENERAL HELPERS
+# =========================================================
+
 def run(command):
     subprocess.run(
         command,
@@ -122,7 +197,7 @@ def get_font(size):
     candidates = [
         "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
         "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
 
     for path in candidates:
@@ -150,6 +225,23 @@ def get_font(size):
 
     raise RuntimeError("Arabic font not found.")
 
+
+def get_credit_font(size):
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ]
+
+    for path in candidates:
+        if Path(path).exists():
+            return ImageFont.truetype(path, size)
+
+    return ImageFont.load_default()
+
+
+# =========================================================
+# SCRIPT CLEANING
+# =========================================================
 
 def clean_script(script):
     ignored = (
@@ -228,6 +320,10 @@ def split_scenes(text):
     return scenes
 
 
+# =========================================================
+# TEXT DRAWING
+# =========================================================
+
 def wrap_text(draw, text, font, max_width):
     words = text.split()
     lines = []
@@ -257,6 +353,10 @@ def wrap_text(draw, text, font, max_width):
     return lines
 
 
+# =========================================================
+# WIKIMEDIA COMMONS
+# =========================================================
+
 def clean_metadata(value):
     if not value:
         return ""
@@ -280,17 +380,29 @@ def commons_request(params):
     )
 
     with urllib.request.urlopen(request, timeout=35) as response:
-        return json.loads(response.read().decode("utf-8"))
+        return json.loads(
+            response.read().decode("utf-8")
+        )
 
 
-def image_search_query(scene_text, topic):
-    combined = f"{topic} {scene_text}".lower()
+def image_search_queries(scene_text, topic):
+    text = scene_text.lower()
+
+    for word, queries in SPECIAL_IMAGE_QUERIES:
+        if word in text:
+            return queries
 
     for arabic_word, english_query in IMAGE_KEYWORDS.items():
-        if arabic_word.lower() in combined:
-            return english_query
+        if arabic_word.lower() in text:
+            return [
+                english_query,
+                "Christian hope sunrise landscape"
+            ]
 
-    return "Jesus Christ Bible Christian prayer"
+    return [
+        "Christian hope sunrise landscape",
+        "open Bible warm sunlight"
+    ]
 
 
 def allowed_license(license_name):
@@ -305,94 +417,110 @@ def allowed_license(license_name):
         "cc-by-sa"
     )
 
-    return any(term in license_name for term in allowed_terms)
+    return any(
+        term in license_name
+        for term in allowed_terms
+    )
 
 
 def search_commons_image(scene_text, topic, used_titles):
-    search_term = image_search_query(scene_text, topic)
+    queries = image_search_queries(scene_text, topic)
 
-    print("Searching Wikimedia Commons:", search_term)
+    for search_term in queries:
+        print(
+            "Searching Wikimedia Commons:",
+            search_term
+        )
 
-    params = {
-        "action": "query",
-        "format": "json",
-        "generator": "search",
-        "gsrsearch": search_term,
-        "gsrnamespace": 6,
-        "gsrlimit": 12,
-        "prop": "imageinfo",
-        "iiprop": "url|extmetadata|size|mime",
-        "iiurlwidth": 1400
-    }
+        params = {
+            "action": "query",
+            "format": "json",
+            "generator": "search",
+            "gsrsearch": search_term,
+            "gsrnamespace": 6,
+            "gsrlimit": 20,
+            "prop": "imageinfo",
+            "iiprop": "url|extmetadata|size|mime",
+            "iiurlwidth": 1600
+        }
 
-    try:
-        data = commons_request(params)
-        pages = data.get("query", {}).get("pages", {})
+        try:
+            data = commons_request(params)
+            pages = data.get("query", {}).get("pages", {})
 
-        for page in pages.values():
-            title = page.get("title", "")
+            for page in pages.values():
+                title = page.get("title", "")
 
-            if not title or title in used_titles:
-                continue
+                if not title or title in used_titles:
+                    continue
 
-            image_info_list = page.get("imageinfo", [])
+                image_info_list = page.get("imageinfo", [])
 
-            if not image_info_list:
-                continue
+                if not image_info_list:
+                    continue
 
-            info = image_info_list[0]
-            mime = info.get("mime", "")
+                info = image_info_list[0]
+                mime = info.get("mime", "")
 
-            if not mime.startswith("image/"):
-                continue
+                if not mime.startswith("image/"):
+                    continue
 
-            width = info.get("width", 0)
-            height = info.get("height", 0)
+                width = info.get("width", 0)
+                height = info.get("height", 0)
 
-            if width < 600 or height < 400:
-                continue
+                if width < 700 or height < 500:
+                    continue
 
-            ext = info.get("extmetadata", {})
+                ext = info.get("extmetadata", {})
 
-            license_name = clean_metadata(
-                ext.get("LicenseShortName", {}).get("value", "")
+                license_name = clean_metadata(
+                    ext.get(
+                        "LicenseShortName", {}
+                    ).get("value", "")
+                )
+
+                if not allowed_license(license_name):
+                    continue
+
+                image_url = (
+                    info.get("thumburl")
+                    or info.get("url")
+                )
+
+                if not image_url:
+                    continue
+
+                author = clean_metadata(
+                    ext.get("Attribution", {}).get("value", "")
+                    or ext.get("Artist", {}).get("value", "")
+                    or "Unknown author"
+                )
+
+                image_title = clean_metadata(
+                    ext.get("ObjectName", {}).get("value", "")
+                    or title.replace("File:", "")
+                )
+
+                description_url = info.get(
+                    "descriptionurl",
+                    "https://commons.wikimedia.org/"
+                )
+
+                return {
+                    "title": image_title,
+                    "author": author,
+                    "license": license_name,
+                    "source": description_url,
+                    "url": image_url,
+                    "commons_title": title
+                }
+
+        except Exception as error:
+            print(
+                "Wikimedia search failed:",
+                str(error)
             )
-
-            if not allowed_license(license_name):
-                continue
-
-            image_url = info.get("thumburl") or info.get("url")
-
-            if not image_url:
-                continue
-
-            author = clean_metadata(
-                ext.get("Attribution", {}).get("value", "")
-                or ext.get("Artist", {}).get("value", "")
-                or "Unknown author"
-            )
-
-            image_title = clean_metadata(
-                ext.get("ObjectName", {}).get("value", "")
-                or title.replace("File:", "")
-            )
-
-            description_url = info.get(
-                "descriptionurl",
-                "https://commons.wikimedia.org/"
-            )
-
-            return {
-                "title": image_title,
-                "author": author,
-                "license": license_name,
-                "source": description_url,
-                "url": image_url,
-                "commons_title": title
-            }
-
-    except Exception as error:
-        print("Wikimedia search unavailable:", str(error))
+            continue
 
     return None
 
@@ -419,18 +547,26 @@ def download_image(image_url, destination):
     return True
 
 
+# =========================================================
+# FALLBACK BACKGROUND
+# =========================================================
+
 def make_fallback_background():
     image = Image.new("RGB", (WIDTH, HEIGHT))
     pixels = image.load()
 
-    top = (9, 19, 38)
-    bottom = (35, 47, 66)
+    # Bright warm sunrise gradient.
+    top = (18, 35, 62)
+    bottom = (176, 125, 67)
 
     for y in range(HEIGHT):
         ratio = y / HEIGHT
 
         color = tuple(
-            int(top[c] * (1 - ratio) + bottom[c] * ratio)
+            int(
+                top[c] * (1 - ratio)
+                + bottom[c] * ratio
+            )
             for c in range(3)
         )
 
@@ -439,6 +575,10 @@ def make_fallback_background():
 
     return image
 
+
+# =========================================================
+# SCENE TEXT
+# =========================================================
 
 def add_scene_text(image, text):
     image = image.convert("RGBA")
@@ -472,7 +612,11 @@ def add_scene_text(image, text):
 
     line_height = 100
     total_height = len(lines) * line_height
-    start_y = 1110 + max(0, (520 - total_height) // 2)
+
+    start_y = 1110 + max(
+        0,
+        (520 - total_height) // 2
+    )
 
     for line_index, line in enumerate(lines):
         box = draw.textbbox(
@@ -508,6 +652,10 @@ def add_scene_text(image, text):
     return image.convert("RGB")
 
 
+# =========================================================
+# IMAGE CREDITS
+# =========================================================
+
 def add_image_credit(image, image_info):
     if not image_info:
         return image
@@ -516,43 +664,49 @@ def add_image_credit(image, image_info):
     draw = ImageDraw.Draw(image, "RGBA")
 
     draw.rectangle(
-        (0, 1835, WIDTH, HEIGHT),
-        fill=(0, 0, 0, 175)
+        (0, 1845, WIDTH, HEIGHT),
+        fill=(0, 0, 0, 150)
     )
 
-    font = get_font(19)
+    font = get_credit_font(18)
 
-    title = image_info.get("title", "Image")
-    author = image_info.get("author", "Unknown author")
-    license_name = image_info.get("license", "License not specified")
+    title = clean_metadata(
+        image_info.get("title", "Image")
+    )[:48]
 
-    line_one = f"Image: {title[:65]} | {author[:65]}"
-    line_two = (
-        f"Wikimedia Commons | {license_name} | Cropped for video"
-    )
+    author = clean_metadata(
+        image_info.get("author", "Unknown author")
+    )[:42]
+
+    license_name = clean_metadata(
+        image_info.get("license", "License")
+    )[:35]
+
+    line_one = f"Image: {title} | {author}"
+    line_two = f"Wikimedia Commons | {license_name}"
 
     draw.text(
-        (WIDTH // 2, 1865),
+        (WIDTH // 2, 1870),
         line_one,
         font=font,
-        fill=(255, 255, 255, 235),
-        anchor="mm",
-        direction="ltr",
-        language="en"
+        fill=(255, 255, 255, 245),
+        anchor="mm"
     )
 
     draw.text(
-        (WIDTH // 2, 1905),
+        (WIDTH // 2, 1908),
         line_two,
         font=font,
-        fill=(230, 220, 200, 235),
-        anchor="mm",
-        direction="ltr",
-        language="en"
+        fill=(245, 230, 205, 245),
+        anchor="mm"
     )
 
     return image.convert("RGB")
 
+
+# =========================================================
+# BUILD SCENE IMAGE
+# =========================================================
 
 def make_scene_image(index, scene_text, topic, used_titles):
     image_info = search_commons_image(
@@ -560,6 +714,8 @@ def make_scene_image(index, scene_text, topic, used_titles):
         topic,
         used_titles
     )
+
+    image = None
 
     if image_info:
         image_path = WORK / f"source_{index:02d}.img"
@@ -573,14 +729,31 @@ def make_scene_image(index, scene_text, topic, used_titles):
             with Image.open(image_path) as source:
                 source = source.convert("RGB")
 
-                image = ImageOps.fit(
+                candidate = ImageOps.fit(
                     source,
                     (WIDTH, HEIGHT),
                     method=Image.Resampling.LANCZOS,
                     centering=(0.5, 0.42)
                 )
 
-            used_titles.add(image_info["commons_title"])
+            # Reject very dark images.
+            brightness = (
+                sum(ImageStat.Stat(candidate).mean) / 3
+            )
+
+            print(
+                f"Image brightness: {brightness:.1f}"
+            )
+
+            if brightness < 38:
+                raise ValueError(
+                    "Image is too dark. Trying fallback."
+                )
+
+            image = candidate
+            used_titles.add(
+                image_info["commons_title"]
+            )
 
             print(
                 "Using image:",
@@ -590,19 +763,38 @@ def make_scene_image(index, scene_text, topic, used_titles):
             )
 
         except Exception as error:
-            print("Image download failed:", str(error))
+            print(
+                "Image rejected:",
+                str(error)
+            )
+
             image = make_fallback_background()
             image_info = None
 
     else:
-        print("No suitable licensed image found; using fallback.")
+        print(
+            "No suitable licensed image found; "
+            "using bright fallback."
+        )
+
         image = make_fallback_background()
 
-    image = add_scene_text(image, scene_text)
-    image = add_image_credit(image, image_info)
+    image = add_scene_text(
+        image,
+        scene_text
+    )
+
+    image = add_image_credit(
+        image,
+        image_info
+    )
 
     return image
 
+
+# =========================================================
+# RENDER VIDEO SCENE
+# =========================================================
 
 def render_scene(image_path, duration, output_path):
     frames = max(
@@ -612,12 +804,15 @@ def render_scene(image_path, duration, output_path):
 
     video_filter = (
         f"zoompan=z='min(zoom+0.00035,1.08)':"
-        f"d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS},"
+        f"d={frames}:"
+        f"s={WIDTH}x{HEIGHT}:"
+        f"fps={FPS},"
         "format=yuv420p"
     )
 
     run([
-        "ffmpeg", "-y",
+        "ffmpeg",
+        "-y",
         "-loop", "1",
         "-framerate", str(FPS),
         "-i", str(image_path),
@@ -627,121 +822,4 @@ def render_scene(image_path, duration, output_path):
         "-c:v", "libx264",
         "-preset", "ultrafast",
         "-pix_fmt", "yuv420p",
-        str(output_path)
-    ])
-
-
-def main():
-    script = os.environ.get(
-        "REEL_SCRIPT", ""
-    ).strip()
-
-    topic = os.environ.get(
-        "REEL_TOPIC", "رسالة روحية"
-    ).strip()
-
-    duration_text = os.environ.get(
-        "REEL_DURATION", "35"
-    ).strip()
-
-    if not script:
-        raise ValueError("REEL_SCRIPT is empty.")
-
-    try:
-        total_duration = float(duration_text)
-    except (TypeError, ValueError):
-        raise ValueError(
-            "REEL_DURATION must be a number of seconds."
-        )
-
-    if total_duration < 5 or total_duration > 180:
-        raise ValueError(
-            "REEL_DURATION must be between 5 and 180 seconds."
-        )
-
-    check_arabic_support()
-
-    narration = clean_script(script)
-    scenes = split_scenes(narration)
-
-    if not scenes:
-        raise ValueError("No scenes could be created from the script.")
-
-    scene_duration = total_duration / len(scenes)
-
-    print("Silent video mode enabled.")
-    print("ElevenLabs will not be called.")
-    print(f"Target duration: {total_duration:.1f} seconds")
-    print(f"Scenes: {len(scenes)}")
-
-    clip_paths = []
-    used_titles = set()
-
-    for index, scene in enumerate(scenes):
-        print(
-            f"Creating scene {index + 1}/{len(scenes)}..."
-        )
-
-        image_path = WORK / f"scene_{index:02d}.png"
-        clip_path = WORK / f"clip_{index:02d}.mp4"
-
-        make_scene_image(
-            index,
-            scene,
-            topic,
-            used_titles
-        ).save(image_path)
-
-        render_scene(
-            image_path,
-            scene_duration,
-            clip_path
-        )
-
-        clip_paths.append(clip_path)
-
-    concat_file = WORK / "concat.txt"
-
-    with concat_file.open(
-        "w",
-        encoding="utf-8"
-    ) as file:
-        for clip in clip_paths:
-            file.write(
-                f"file '{clip.resolve()}'\n"
-            )
-
-    safe_topic = re.sub(
-        r"[^a-zA-Z0-9_-]+",
-        "-",
-        topic
-    ).strip("-")
-
-    if not safe_topic:
-        safe_topic = "christian-reel"
-
-    final_path = OUTPUT / f"{safe_topic[:35]}-silent.mp4"
-
-    print("Joining silent video scenes...")
-
-    run([
-        "ffmpeg", "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", str(concat_file),
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-pix_fmt", "yuv420p",
-        "-an",
-        "-movflags", "+faststart",
-        str(final_path)
-    ])
-
-    print(f"SUCCESS: {final_path}")
-    print(
-        f"Silent video duration target: {total_duration:.1f} seconds"
-    )
-
-
-if __name__ == "__main__":
-    main()
+        str
