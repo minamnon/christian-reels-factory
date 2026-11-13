@@ -30,10 +30,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install FFmpeg
+      - name: Install FFmpeg and Arabic rendering libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y \
+            ffmpeg \
+            fonts-noto-core \
+            fontconfig \
+            libraqm-dev \
+            libharfbuzz-dev \
+            libfribidi-dev \
+            pkg-config
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -43,15 +50,19 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f worker/render/requirements.txt ]; then
-            pip install -r worker/render/requirements.txt
-          fi
+          pip install -r worker/render/requirements.txt
+
+      - name: Verify Arabic rendering support
+        run: |
+          python -c "from PIL import features; print('RAQM:', features.check_feature('raqm')); assert features.check_feature('raqm'), 'Pillow RAQM support is missing'"
 
       - name: Render video
         env:
           REEL_TOPIC: ${{ inputs.topic }}
           REEL_SCRIPT: ${{ inputs.script }}
           REEL_DURATION: ${{ inputs.duration_seconds }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
         run: |
           python worker/render/render.py
 
