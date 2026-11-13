@@ -14,7 +14,7 @@ function createServer() {
     {
       description:
         "Check the status of the Christian Reels Factory project.",
-      inputSchema: {},
+      inputSchema: z.object({}),
     },
     async () => ({
       content: [
@@ -29,10 +29,8 @@ function createServer() {
   return server;
 }
 
-const handler = createMcpHandler(createServer);
-
 export default {
-  fetch(request: Request, env: unknown, ctx: ExecutionContext) {
-    return handler(request, env, ctx);
+  fetch(request, env, ctx) {
+    return createMcpHandler(createServer)(request, env, ctx);
   },
 };
