@@ -1,3 +1,4 @@
+
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { env } from "cloudflare:workers";
@@ -41,13 +42,9 @@ function buildPrompt(
 - أخرج الإجابة النهائية فقط.
 - ممنوع إظهار التفكير الداخلي أو خطوات التحليل.
 - لا تستخدم جداول.
-- لا تكتب مقدمات أو اعتذارات.
 - استخدم لهجة مصرية سليمة وطبيعية.
-- اجعل السيناريو مناسبًا للمدة المطلوبة.
-- قسّم الفيديو إلى مشاهد بتوقيت واضح.
 - اجعل أول 3 ثوانٍ جذابة وقوية.
 - لا تخترع آيات أو اقتباسات كتابية.
-- لا تضع نص آية بين علامتي اقتباس إلا إذا كنت متأكدًا من دقته.
 - اذكر المرجع الكتابي بوضوح.
 - اختم برسالة روحية مؤثرة.
 
@@ -174,7 +171,7 @@ function canFallback(error: unknown): boolean {
 function createServer() {
   const server = new McpServer({
     name: "christian-reels-factory",
-    version: "0.4.0",
+    version: "0.5.0",
   });
 
   server.registerTool(
@@ -200,8 +197,7 @@ function createServer() {
         bible_reference: z.string().optional(),
         key_message: z.string().optional(),
         duration_seconds: z.number().int().min(20).max(60).optional(),
-        provider: z.enum(["auto", "gemini", "groq"]).optional()
-          .describe("auto uses Gemini then Groq fallback; gemini or groq tests a provider directly."),
+        provider: z.enum(["auto", "gemini", "groq"]).optional(),
       }),
     },
     async ({
@@ -282,6 +278,89 @@ function createServer() {
               error instanceof Error ? error.message : "Unknown error"
             }`,
           }],
+        };
+      }
+    }
+  );
+
+  // Automatic video rendering tool
+  server.registerTool(
+    "render_reel",
+    {
+      description:
+        "Start rendering a complete Christian Reel MP4 from its Arabic script using GitHub Actions.",
+      inputSchema: z.object({
+        topic: z.string().min(3).max(120),
+        script: z.string().min(30).max(10000),
+        duration_seconds: z.number().int().min(20).max(60).default(35),
+      }),
+    },
+    async ({ topic, script, duration_seconds }) => {
+      const secrets = env as unknown as {
+        GITHUB_TOKEN?: string;
+        GITHUB_REPOSITORY?: string;
+      };
+
+      try {
+        const token = secrets.GITHUB_TOKEN;
+        const repository =
+          secrets.GITHUB_REPOSITORY ||
+          "minamnon/christian-reels-factory";
+
+        if (!token) {
+          throw new Error(
+            "GITHUB_TOKEN is not configured in Cloudflare Worker secrets."
+          );
+        }
+
+        const response = await fetch(
+          `https://api.github.com/repos/${repository}/actions/workflows/render-reel.yml/dispatches`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "Content-Type": "application/json",
+              "User-Agent": "Christian-Reels-Factory",
+            },
+            body: JSON.stringify({
+              ref: "main",
+              inputs: {
+                topic,
+                script,
+                duration_seconds: String(duration_seconds),
+              },
+            }),
+          }
+        );
+
+        if (!response.ok) {
+          const details = await response.text();
+          throw new Error(
+            `GitHub Actions error ${response.status}: ${details}`
+          );
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text:
+              "RENDER_JOB_SUBMITTED\n" +
+              `Repository: ${repository}\n` +
+              "Workflow: render-reel.yml\n" +
+              "The render job has started. The MP4 is not ready yet.",
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: "text",
+            text: `فشل بدء إنتاج الفيديو: ${
+              error instanceof Error ? error.message : "Unknown error"
+            }`,
+          }],
+          isError: true,
         };
       }
     }
