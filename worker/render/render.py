@@ -2,6 +2,7 @@ import json
 import math
 import os
 import re
+import urllib.error
 import html
 import subprocess
 import urllib.parse
@@ -276,8 +277,19 @@ def search_pixabay(query):
             })
         return candidates
 
+        except urllib.error.HTTPError as error:
+        try:
+            details = error.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            details = "Could not read Pixabay error response."
+
+        # Never print the request URL because it may contain the API key.
+        print(f"Pixabay HTTP error: {error.code}")
+        print("Pixabay response:", details[:1000])
+        return []
+
     except Exception as error:
-        print("Pixabay search failed:", str(error))
+        print("Pixabay search failed:", type(error).__name__, str(error))
         return []
 
 
