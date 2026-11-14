@@ -16,6 +16,18 @@ on:
         required: true
         default: "35"
         type: string
+      facebook_title:
+        description: "Facebook post title"
+        required: true
+        type: string
+      facebook_caption:
+        description: "Facebook post caption"
+        required: true
+        type: string
+      facebook_hashtags:
+        description: "Facebook post hashtags"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -60,6 +72,9 @@ jobs:
           REEL_TOPIC: ${{ inputs.topic }}
           REEL_SCRIPT: ${{ inputs.script }}
           REEL_DURATION: ${{ inputs.duration_seconds }}
+          FACEBOOK_TITLE: ${{ inputs.facebook_title }}
+          FACEBOOK_CAPTION: ${{ inputs.facebook_caption }}
+          FACEBOOK_HASHTAGS: ${{ inputs.facebook_hashtags }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
           ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
@@ -68,26 +83,51 @@ jobs:
         run: |
           python worker/render/render.py
 
-      - name: Upload MP4
+      - name: Create Facebook post file
+        env:
+          FACEBOOK_TITLE: ${{ inputs.facebook_title }}
+          FACEBOOK_CAPTION: ${{ inputs.facebook_caption }}
+          FACEBOOK_HASHTAGS: ${{ inputs.facebook_hashtags }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          title = os.environ["FACEBOOK_TITLE"].strip()
+          caption = os.environ["FACEBOOK_CAPTION"].strip()
+          hashtags = os.environ["FACEBOOK_HASHTAGS"].strip()
+          content = f"{title}\n\n{caption}\n\n{hashtags}\n"
+          Path("output/facebook_post.txt").write_text(content, encoding="utf-8")
+          Path("facebook_release_notes.md").write_text(
+              f"## {title}\n\n{caption}\n\n{hashtags}",
+              encoding="utf-8",
+          )
+          print("Facebook post file created.")
+
+      - name: Upload reel and Facebook post
         uses: actions/upload-artifact@v4
         with:
           name: christian-reel
-          path: output/*.mp4
+          path: |
+            output/*.mp4
+            output/facebook_post.txt
           if-no-files-found: error
           retention-days: 3
 
-      - name: Publish MP4 as GitHub Release
+      - name: Publish reel and Facebook post as GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: reel-${{ github.run_id }}
         run: |
           FILE=$(ls output/*.mp4 | head -n 1)
-          gh release create "$TAG" "$FILE" \
+          gh release create "$TAG" "$FILE" output/facebook_post.txt \
             --repo "${{ github.repository }}" \
             --title "Reel $TAG" \
-            --notes "Topic: ${{ inputs.topic }}"
+            --notes-file facebook_release_notes.md
           NAME=$(basename "$FILE")
           URL="https://github.com/${{ github.repository }}/releases/download/$TAG/$NAME"
           echo "Download: $URL"
           echo "### Download link" >> "$GITHUB_STEP_SUMMARY"
           echo "$URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Facebook post" >> "$GITHUB_STEP_SUMMARY"
+          cat facebook_release_notes.md >> "$GITHUB_STEP_SUMMARY"

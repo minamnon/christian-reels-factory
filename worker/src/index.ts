@@ -340,14 +340,24 @@ function createServer() {
     "render_reel",
     {
       description:
-        "Start rendering a complete Christian Reel MP4 from its Arabic script using GitHub Actions. Returns the GitHub run ID; use render_status to follow progress.",
+        "Create a Christian Reel MP4 and its Facebook post. Before calling, write a Facebook title, caption, and relevant hashtags based on the exact script, then pass all three fields. Returns the GitHub run ID; use render_status to follow progress.",
       inputSchema: z.object({
         topic: z.string().min(3).max(120),
         script: z.string().min(30).max(10000),
         duration_seconds: z.number().int().min(20).max(60).default(35),
+        facebook_title: z.string().min(3).max(180),
+        facebook_caption: z.string().min(10).max(3000),
+        facebook_hashtags: z.string().min(3).max(1000),
       }),
     },
-    async ({ topic, script, duration_seconds }) => {
+    async ({
+      topic,
+      script,
+      duration_seconds,
+      facebook_title,
+      facebook_caption,
+      facebook_hashtags,
+    }) => {
       try {
         const { token, repository } = getGithubConfig();
 
@@ -362,6 +372,9 @@ function createServer() {
                 topic,
                 script,
                 duration_seconds: String(duration_seconds),
+                facebook_title,
+                facebook_caption,
+                facebook_hashtags,
               },
               return_run_details: true,
             }),
@@ -470,12 +483,22 @@ function createServer() {
                   `/repos/${repository}/releases/tags/reel-${run_id}`,
                   token
                 );
-                const mp4 = (release?.assets ?? []).find((a: any) =>
+                const assets: any[] = release?.assets ?? [];
+                const mp4 = assets.find((a: any) =>
                   String(a.name).toLowerCase().endsWith(".mp4")
+                );
+                const facebookPost = assets.find((a: any) =>
+                  String(a.name).toLowerCase() === "facebook_post.txt"
                 );
                 if (mp4) {
                   lines.push(`Download URL: ${mp4.browser_download_url}`);
                   lines.push(`Release URL: ${release.html_url}`);
+                  if (facebookPost) {
+                    lines.push(`Facebook post file: ${facebookPost.browser_download_url}`);
+                  }
+                  if (release.body) {
+                    lines.push("", "FACEBOOK POST:", release.body);
+                  }
                 } else {
                   lines.push("Release found but it has no MP4 asset.");
                 }
