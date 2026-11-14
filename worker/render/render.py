@@ -423,14 +423,30 @@ def search_commons(query):
 # CANDIDATE SCORING AND DOWNLOAD
 # =========================================================
 
-def score_candidate(candidate, query):
-    title = (candidate.get("title") or "").lower()
-    query_words = {
-        word.lower()
-        for word in re.findall(r"[a-zA-Z]{3,}", query)
+# Minimum number of meaningful query words that must appear in an image's
+# title/tags. Images below this are rejected instead of used blindly.
+MIN_RELEVANCE = 1
+
+_GENERIC_WORDS = {
+    "person", "people", "photo", "image", "picture",
+    "with", "after", "over", "the", "and"
+}
+
+
+def _stems(text):
+    return {
+        word.lower()[:4]
+        for word in re.findall(r"[a-zA-Z]{3,}", text or "")
+        if word.lower() not in _GENERIC_WORDS
     }
-    title_words = set(re.findall(r"[a-zA-Z]{3,}", title))
-    overlap = len(query_words & title_words)
+
+
+def relevance_overlap(candidate, query):
+    return len(_stems(query) & _stems(candidate.get("title")))
+
+
+def score_candidate(candidate, query):
+    overlap = relevance_overlap(candidate, query)
 
     width = max(1, int(candidate.get("width", 1)))
     height = max(1, int(candidate.get("height", 1)))
@@ -508,8 +524,17 @@ def choose_scene_image(index, scene_text, topic, used_ids):
         if uid and uid not in used_ids:
             unique[uid] = candidate
 
+    relevant = [
+        item for item in unique.values()
+        if max(relevance_overlap(item, q) for q in queries) >= MIN_RELEVANCE
+    ]
+    print(
+        f"Relevant candidates: {len(relevant)} of {len(unique)} "
+        f"(min overlap {MIN_RELEVANCE})"
+    )
+
     ranked = sorted(
-        unique.values(),
+        relevant,
         key=lambda item: max(
             score_candidate(item, query) for query in queries
         ),
