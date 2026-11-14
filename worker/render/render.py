@@ -11,6 +11,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageStat, features
 
+import voice
+
 
 # =========================================================
 # SETTINGS
@@ -134,13 +136,18 @@ SPECIAL_IMAGE_QUERIES = [
 # =========================================================
 
 def run(command):
-    subprocess.run(
-        command,
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+    except subprocess.CalledProcessError as error:
+        print("Command failed:", command[0])
+        print((error.stderr or "")[-1500:])
+        raise
 
 
 def check_arabic_support():
@@ -811,7 +818,29 @@ def main():
     print("Number of scenes:", len(scenes))
 
     used_ids = set()
-    scene_duration = duration / len(scenes)
+
+    voice_path = None
+    try:
+        voice_path = voice.generate_voice(clean_text, WORK)
+        if voice_path:
+            voice_seconds = voice.audio_duration(voice_path)
+            total_seconds = voice_seconds + 1.0
+            print(
+                f"Voice-over: {voice_seconds:.1f}s "
+                f"(requested {duration}s). Video will be {total_seconds:.1f}s."
+            )
+    except Exception as error:
+        print("Voice-over unusable:", type(error).__name__, str(error)[:200])
+        voice_path = None
+
+    if not voice_path:
+        total_seconds = float(duration)
+        print("Rendering a silent video.")
+
+    weights = [max(1, len(scene)) for scene in scenes]
+    scene_durations = [
+        total_seconds * weight / sum(weights) for weight in weights
+    ]
     scene_files = []
 
     for pattern in ("scene_*.mp4", "scene_*.jpg", "candidate_*", "source_*"):
@@ -836,7 +865,7 @@ def main():
         video_path = WORK / f"scene_{index:02d}.mp4"
 
         image.save(image_path, "JPEG", quality=94)
-        render_scene(image_path, scene_duration, video_path)
+        render_scene(image_path, scene_durations[index - 1], video_path)
         scene_files.append(video_path)
 
     concat_file = WORK / "concat_list.txt"
@@ -851,19 +880,39 @@ def main():
     print()
     print("Combining all scenes...")
 
-    run([
-        "ffmpeg", "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", str(concat_file),
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-pix_fmt", "yuv420p",
-        "-r", str(FPS),
-        "-an",
-        "-movflags", "+faststart",
-        str(output_path)
-    ])
+    def final_command(with_voice):
+        command = [
+            "ffmpeg", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(concat_file),
+        ]
+        if with_voice:
+            command += ["-i", str(voice_path)]
+        command += [
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p",
+            "-r", str(FPS),
+        ]
+        if with_voice:
+            command += [
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-c:a", "aac", "-b:a", "192k",
+                "-af", "apad", "-shortest",
+            ]
+        else:
+            command += ["-an"]
+        command += ["-movflags", "+faststart", str(output_path)]
+        return command
+
+    try:
+        run(final_command(bool(voice_path)))
+    except subprocess.CalledProcessError:
+        if not voice_path:
+            raise
+        print("Audio mux failed. Retrying without audio.")
+        run(final_command(False))
 
     if not output_path.exists() or output_path.stat().st_size == 0:
         raise RuntimeError("Final video was not created correctly.")
