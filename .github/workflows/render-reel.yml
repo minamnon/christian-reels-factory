@@ -1,4 +1,3 @@
-
 name: Render Christian Reel
 
 on:
@@ -19,7 +18,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   render:
@@ -74,3 +73,19 @@ jobs:
           path: output/*.mp4
           if-no-files-found: error
           retention-days: 3
+
+      - name: Publish MP4 as GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: reel-${{ github.run_id }}
+        run: |
+          FILE=$(ls output/*.mp4 | head -n 1)
+          gh release create "$TAG" "$FILE" \
+            --repo "${{ github.repository }}" \
+            --title "Reel $TAG" \
+            --notes "Topic: ${{ inputs.topic }}"
+          NAME=$(basename "$FILE")
+          URL="https://github.com/${{ github.repository }}/releases/download/$TAG/$NAME"
+          echo "Download: $URL"
+          echo "### Download link" >> "$GITHUB_STEP_SUMMARY"
+          echo "$URL" >> "$GITHUB_STEP_SUMMARY"
