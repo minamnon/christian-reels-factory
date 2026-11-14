@@ -822,4 +822,155 @@ def render_scene(image_path, duration, output_path):
         "-c:v", "libx264",
         "-preset", "ultrafast",
         "-pix_fmt", "yuv420p",
-        str
+        
+        str(output_path),
+    ])
+
+
+# =========================================================
+# MAIN VIDEO GENERATION
+# =========================================================
+
+def main():
+    topic = os.environ.get(
+        "REEL_TOPIC",
+        "رسالة رجاء وأمل"
+    ).strip()
+
+    script = os.environ.get(
+        "REEL_SCRIPT",
+        ""
+    ).strip()
+
+    duration = int(
+        os.environ.get(
+            "REEL_DURATION",
+            "35"
+        )
+    )
+
+    if not script:
+        raise ValueError(
+            "REEL_SCRIPT is empty."
+        )
+
+    if duration < 10 or duration > 180:
+        raise ValueError(
+            "Video duration must be between 10 and 180 seconds."
+        )
+
+    check_arabic_support()
+
+    print("=" * 55)
+    print("CHRISTIAN REELS FACTORY")
+    print("Topic:", topic)
+    print("Duration:", duration)
+    print("=" * 55)
+
+    clean_text = clean_script(script)
+    scenes = split_scenes(clean_text)
+
+    if not scenes:
+        raise RuntimeError("No scenes were generated.")
+
+    print("Number of scenes:", len(scenes))
+
+    used_titles = set()
+    scene_duration = duration / len(scenes)
+    scene_files = []
+
+    # Remove old temporary scene files.
+    for old_file in WORK.glob("scene_*.mp4"):
+        old_file.unlink()
+
+    for old_file in WORK.glob("scene_*.jpg"):
+        old_file.unlink()
+
+    for index, scene_text in enumerate(scenes, start=1):
+        print()
+        print("-" * 50)
+        print(f"Rendering scene {index}/{len(scenes)}")
+        print(scene_text)
+
+        image = make_scene_image(
+            index,
+            scene_text,
+            topic,
+            used_titles
+        )
+
+        image_path = WORK / f"scene_{index:02d}.jpg"
+        video_path = WORK / f"scene_{index:02d}.mp4"
+
+        image.save(
+            image_path,
+            "JPEG",
+            quality=94
+        )
+
+        render_scene(
+            image_path,
+            scene_duration,
+            video_path
+        )
+
+        scene_files.append(video_path)
+
+    # Create FFmpeg concat list.
+    concat_file = WORK / "concat_list.txt"
+
+    with concat_file.open(
+        "w",
+        encoding="utf-8"
+    ) as file:
+        for scene_file in scene_files:
+            safe_path = str(scene_file.resolve()).replace(
+                "'",
+                "'\\''"
+            )
+
+            file.write(
+                f"file '{safe_path}'\n"
+            )
+
+    # Final output.
+    output_path = OUTPUT / "christian_reel.mp4"
+
+    if output_path.exists():
+        output_path.unlink()
+
+    print()
+    print("Combining all scenes...")
+
+    run([
+        "ffmpeg",
+        "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", str(concat_file),
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-pix_fmt", "yuv420p",
+        "-r", str(FPS),
+        "-an",
+        "-movflags", "+faststart",
+        str(output_path)
+    ])
+
+    if not output_path.exists():
+        raise RuntimeError("Final video was not created.")
+
+    if output_path.stat().st_size == 0:
+        raise RuntimeError("Final video is empty.")
+
+    print()
+    print("=" * 55)
+    print("VIDEO CREATED SUCCESSFULLY")
+    print("Output:", output_path)
+    print("Size:", output_path.stat().st_size, "bytes")
+    print("=" * 55)
+
+
+if __name__ == "__main__":
+    main()
+    
