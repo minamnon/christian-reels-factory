@@ -1,4 +1,3 @@
-
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { env } from "cloudflare:workers";
@@ -168,10 +167,63 @@ function canFallback(error: unknown): boolean {
   );
 }
 
+// ---------------------------------------------------------
+// GitHub helpers
+// ---------------------------------------------------------
+
+function getGithubConfig() {
+  const secrets = env as unknown as {
+    GITHUB_TOKEN?: string;
+    GITHUB_REPOSITORY?: string;
+  };
+
+  const token = secrets.GITHUB_TOKEN;
+  const repository =
+    secrets.GITHUB_REPOSITORY || "minamnon/christian-reels-factory";
+
+  if (!token) {
+    throw new Error(
+      "GITHUB_TOKEN is not configured in Cloudflare Worker secrets."
+    );
+  }
+
+  return { token, repository };
+}
+
+function githubHeaders(token: string) {
+  return {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "Content-Type": "application/json",
+    "User-Agent": "Christian-Reels-Factory",
+  };
+}
+
+async function githubGet(path: string, token: string): Promise<any> {
+  const response = await fetch(`https://api.github.com${path}`, {
+    method: "GET",
+    headers: githubHeaders(token),
+  });
+
+  if (!response.ok) {
+    const details = (await response.text()).slice(0, 500);
+    const hint =
+      [401, 403, 404].includes(response.status)
+        ? " (check GITHUB_TOKEN permissions: Actions read/write)"
+        : "";
+    throw new Error(
+      `GitHub API error ${response.status}${hint}: ${details}`
+    );
+  }
+
+  return response.json();
+}
+
 function createServer() {
   const server = new McpServer({
     name: "christian-reels-factory",
-    version: "0.5.0",
+    version: "0.6.0",
   });
 
   server.registerTool(
@@ -288,7 +340,7 @@ function createServer() {
     "render_reel",
     {
       description:
-        "Start rendering a complete Christian Reel MP4 from its Arabic script using GitHub Actions.",
+        "Start rendering a complete Christian Reel MP4 from its Arabic script using GitHub Actions. Returns the GitHub run ID; use render_status to follow progress.",
       inputSchema: z.object({
         topic: z.string().min(3).max(120),
         script: z.string().min(30).max(10000),
@@ -296,34 +348,14 @@ function createServer() {
       }),
     },
     async ({ topic, script, duration_seconds }) => {
-      const secrets = env as unknown as {
-        GITHUB_TOKEN?: string;
-        GITHUB_REPOSITORY?: string;
-      };
-
       try {
-        const token = secrets.GITHUB_TOKEN;
-        const repository =
-          secrets.GITHUB_REPOSITORY ||
-          "minamnon/christian-reels-factory";
-
-        if (!token) {
-          throw new Error(
-            "GITHUB_TOKEN is not configured in Cloudflare Worker secrets."
-          );
-        }
+        const { token, repository } = getGithubConfig();
 
         const response = await fetch(
           `https://api.github.com/repos/${repository}/actions/workflows/render-reel.yml/dispatches`,
           {
             method: "POST",
-            headers: {
-              Authorization: `Bearer ${token}`,
-              Accept: "application/vnd.github+json",
-              "X-GitHub-Api-Version": "2022-11-28",
-              "Content-Type": "application/json",
-              "User-Agent": "Christian-Reels-Factory",
-            },
+            headers: githubHeaders(token),
             body: JSON.stringify({
               ref: "main",
               inputs: {
@@ -331,32 +363,143 @@ function createServer() {
                 script,
                 duration_seconds: String(duration_seconds),
               },
+              return_run_details: true,
             }),
           }
         );
 
         if (!response.ok) {
-          const details = await response.text();
+          const details = (await response.text()).slice(0, 500);
           throw new Error(
             `GitHub Actions error ${response.status}: ${details}`
           );
         }
 
+        let runId: number | undefined;
+        let runUrl: string | undefined;
+
+        if (response.status === 200) {
+          try {
+            const data: any = await response.json();
+            runId = data?.workflow_run_id ?? data?.id;
+            runUrl = data?.html_url;
+          } catch {
+            // Body could not be parsed; the run ID stays unknown.
+          }
+        }
+
+        const lines = [
+          "RENDER_JOB_SUBMITTED",
+          `Repository: ${repository}`,
+          "Workflow: render-reel.yml",
+          runId
+            ? `Run ID: ${runId}`
+            : "Run ID: not returned by GitHub",
+        ];
+
+        if (runUrl) {
+          lines.push(`Run URL: ${runUrl}`);
+        }
+
+        lines.push(
+          runId
+            ? "The MP4 is not ready yet. Use render_status with this run_id to check progress."
+            : "The MP4 is not ready yet. The run ID could not be determined."
+        );
+
         return {
-          content: [{
-            type: "text",
-            text:
-              "RENDER_JOB_SUBMITTED\n" +
-              `Repository: ${repository}\n` +
-              "Workflow: render-reel.yml\n" +
-              "The render job has started. The MP4 is not ready yet.",
-          }],
+          content: [{ type: "text", text: lines.join("\n") }],
         };
       } catch (error) {
         return {
           content: [{
             type: "text",
             text: `فشل بدء إنتاج الفيديو: ${
+              error instanceof Error ? error.message : "Unknown error"
+            }`,
+          }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // Render status tool
+  server.registerTool(
+    "render_status",
+    {
+      description:
+        "Check the status of a render job started by render_reel, using its GitHub run ID. On failure it names the failed step; on success it lists the output artifact.",
+      inputSchema: z.object({
+        run_id: z.number().int().positive(),
+      }),
+    },
+    async ({ run_id }) => {
+      try {
+        const { token, repository } = getGithubConfig();
+
+        const run: any = await githubGet(
+          `/repos/${repository}/actions/runs/${run_id}`,
+          token
+        );
+
+        const lines = [
+          `RUN_STATUS: ${run.status}`,
+          `Conclusion: ${run.conclusion ?? "none yet"}`,
+          `Run URL: ${run.html_url}`,
+        ];
+
+        if (run.status === "completed") {
+          if (run.conclusion === "success") {
+            const artifactData: any = await githubGet(
+              `/repos/${repository}/actions/runs/${run_id}/artifacts`,
+              token
+            );
+            const artifacts: any[] = artifactData?.artifacts ?? [];
+
+            if (artifacts.length === 0) {
+              lines.push("No artifacts were found for this run.");
+            } else {
+              for (const artifact of artifacts) {
+                lines.push(
+                  `Artifact: ${artifact.name} | ${artifact.size_in_bytes} bytes | expired: ${artifact.expired}`
+                );
+              }
+              lines.push(
+                "Direct download link is not available yet from this tool."
+              );
+            }
+          } else {
+            const jobData: any = await githubGet(
+              `/repos/${repository}/actions/runs/${run_id}/jobs`,
+              token
+            );
+            const failedSteps: string[] = [];
+
+            for (const job of jobData?.jobs ?? []) {
+              for (const step of job.steps ?? []) {
+                if (step.conclusion === "failure") {
+                  failedSteps.push(`${job.name} -> ${step.name}`);
+                }
+              }
+            }
+
+            if (failedSteps.length > 0) {
+              lines.push("Failed step(s): " + failedSteps.join("; "));
+            } else {
+              lines.push("No failed step was identified.");
+            }
+          }
+        }
+
+        return {
+          content: [{ type: "text", text: lines.join("\n") }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: "text",
+            text: `فشل جلب حالة التشغيل: ${
               error instanceof Error ? error.message : "Unknown error"
             }`,
           }],
