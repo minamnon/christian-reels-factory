@@ -162,7 +162,7 @@ function canFallback(error: unknown): boolean {
     return true;
   }
 
-  return [408, 429, 500, 502, 503, 504].includes(
+  return [404, 408, 429, 500, 502, 503, 504].includes(
     error.status ?? 0
   );
 }
