@@ -465,9 +465,25 @@ function createServer() {
                   `Artifact: ${artifact.name} | ${artifact.size_in_bytes} bytes | expired: ${artifact.expired}`
                 );
               }
-              lines.push(
-                "Direct download link is not available yet from this tool."
-              );
+              try {
+                const release: any = await githubGet(
+                  `/repos/${repository}/releases/tags/reel-${run_id}`,
+                  token
+                );
+                const mp4 = (release?.assets ?? []).find((a: any) =>
+                  String(a.name).toLowerCase().endsWith(".mp4")
+                );
+                if (mp4) {
+                  lines.push(`Download URL: ${mp4.browser_download_url}`);
+                  lines.push(`Release URL: ${release.html_url}`);
+                } else {
+                  lines.push("Release found but it has no MP4 asset.");
+                }
+              } catch {
+                lines.push(
+                  `No release found for tag reel-${run_id}. Use the Artifact from the Run URL.`
+                );
+              }
             }
           } else {
             const jobData: any = await githubGet(
