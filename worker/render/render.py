@@ -277,7 +277,7 @@ def search_pixabay(query):
             })
         return candidates
 
-except urllib.error.HTTPError as error:
+    except urllib.error.HTTPError as error:
         try:
             details = error.read().decode("utf-8", errors="replace").strip()
         except Exception:
