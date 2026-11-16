@@ -13,6 +13,15 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageStat, features
 
 import voice
 
+try:
+    # GitHub Actions runs render.py directly from worker/render/.
+    from image_generation import generate_scene_image
+except ModuleNotFoundError as error:
+    if error.name != "image_generation":
+        raise
+    # Also support importing render.py as a repository package.
+    from worker.render.image_generation import generate_scene_image
+
 
 # =========================================================
 # SETTINGS
@@ -505,83 +514,25 @@ def download_candidate(candidate, destination):
     return image
 
 
-def choose_scene_image(index, scene_text, topic, used_ids):
-    queries = image_search_queries(scene_text, topic)
-    all_candidates = []
+def choose_scene_image(index, scene_text, topic, used_ids=None):
+    """
+    Generate a dedicated AI image for this exact scene.
+    No stock-image search or fallback is allowed.
+    """
+    print(f"Generating AI image for scene {index}.")
 
-    for query in queries:
-        print("Searching image providers for:", query)
+    image = generate_scene_image(
+        scene_text=scene_text,
+        topic=topic,
+        scene_number=index
+    )
 
-        # Query all providers; one provider failing does not stop the others.
-        providers = (
-            ("Pixabay", search_pixabay),
-            ("Openverse", search_openverse),
-            ("Wikimedia Commons", search_commons)
+    if image.size != (WIDTH, HEIGHT):
+        raise RuntimeError(
+            f"Scene {index} has unexpected image size: {image.size}"
         )
 
-        for provider_name, search_function in providers:
-            results = search_function(query)
-            print(f"{provider_name}: {len(results)} candidate(s)")
-            all_candidates.extend(results)
-
-    # Remove duplicates and previously used images.
-    unique = {}
-    for candidate in all_candidates:
-        uid = candidate.get("unique_id")
-        if uid and uid not in used_ids:
-            unique[uid] = candidate
-
-    relevant = [
-        item for item in unique.values()
-        if max(relevance_overlap(item, q) for q in queries) >= MIN_RELEVANCE
-    ]
-    print(
-        f"Relevant candidates: {len(relevant)} of {len(unique)} "
-        f"(min overlap {MIN_RELEVANCE})"
-    )
-
-    ranked = sorted(
-        relevant,
-        key=lambda item: max(
-            score_candidate(item, query) for query in queries
-        ),
-        reverse=True
-    )
-
-    print("Unique candidates after filtering:", len(ranked))
-
-    for candidate_number, candidate in enumerate(ranked[:35], start=1):
-        image_path = WORK / f"candidate_{index:02d}_{candidate_number:02d}.img"
-
-        try:
-            image = download_candidate(candidate, image_path)
-            used_ids.add(candidate["unique_id"])
-
-            print(
-                "Selected:",
-                candidate["provider"],
-                "|",
-                candidate["title"],
-                "|",
-                candidate["license"]
-            )
-            return image, candidate
-
-        except Exception as error:
-            print(
-                "Candidate rejected:",
-                candidate.get("provider"),
-                candidate.get("title"),
-                "|",
-                str(error)
-            )
-            try:
-                image_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-    print("No suitable image found. Using designed fallback background.")
-    return make_fallback_background(), None
+    return image, None
 
 
 # =========================================================
@@ -803,11 +754,10 @@ def main():
     check_arabic_support()
 
     print("=" * 55)
-    print("CHRISTIAN REELS FACTORY - MULTI SOURCE")
+    print("CHRISTIAN REELS FACTORY - AI IMAGE GENERATION")
     print("Topic:", topic)
     print("Duration:", duration)
-    print("Pixabay key configured:", bool(PIXABAY_KEY))
-    print("Providers: Pixabay, Openverse, Wikimedia Commons")
+    print("Image provider: Cloudflare FLUX.1 Schnell")
     print("=" * 55)
 
     clean_text = clean_script(script)
