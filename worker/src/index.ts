@@ -340,14 +340,15 @@ function createServer() {
     "render_reel",
     {
       description:
-        "Create a Christian Reel MP4 and its Facebook post. Before calling, write a Facebook title, caption, and relevant hashtags based on the exact script, then pass all three fields. Returns the GitHub run ID; use render_status to follow progress.",
+        "Create a Christian Reel MP4 and its Facebook post. Before calling, write a Facebook title, caption, and relevant hashtags based on the exact script, then pass all three fields. Optional scene_plan: a JSON string with profile, characters and per-scene narration plus English visual prompts. Returns the GitHub run ID; use render_status to follow progress.",
       inputSchema: z.object({
-        topic: z.string().min(3).max(120),
+        topic: z.string().min(3).max(1000),
         script: z.string().min(30).max(10000),
         duration_seconds: z.number().int().min(20).max(60).default(35),
         facebook_title: z.string().min(3).max(180),
         facebook_caption: z.string().min(10).max(3000),
         facebook_hashtags: z.string().min(3).max(1000),
+        scene_plan: z.string().max(40000).optional(),
       }),
     },
     async ({
@@ -357,6 +358,7 @@ function createServer() {
       facebook_title,
       facebook_caption,
       facebook_hashtags,
+      scene_plan,
     }) => {
       try {
         const { token, repository } = getGithubConfig();
@@ -375,6 +377,7 @@ function createServer() {
                 facebook_title,
                 facebook_caption,
                 facebook_hashtags,
+                scene_plan: scene_plan ?? "",
               },
               return_run_details: true,
             }),

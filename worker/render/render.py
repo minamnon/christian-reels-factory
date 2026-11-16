@@ -514,7 +514,24 @@ def download_candidate(candidate, destination):
     return image
 
 
-def choose_scene_image(index, scene_text, topic, used_ids=None):
+def load_scene_plan():
+    raw = os.environ.get("REEL_SCENE_PLAN", "").strip()
+    if not raw:
+        return None
+    plan = json.loads(raw)
+    scenes = plan.get("scenes")
+    if not isinstance(scenes, list) or not 1 <= len(scenes) <= 12:
+        raise ValueError("scene_plan must contain 1 to 12 scenes.")
+    for number, scene in enumerate(scenes, start=1):
+        if not str(scene.get("narration", "")).strip():
+            raise ValueError(f"Scene {number} has no narration.")
+        if not str(scene.get("visual", "")).strip():
+            raise ValueError(f"Scene {number} has no visual description.")
+    return plan
+
+
+def choose_scene_image(index, scene_text, topic, used_ids=None,
+                       scene_plan=None, scene_index=None):
     """
     Generate a dedicated AI image for this exact scene.
     No stock-image search or fallback is allowed.
@@ -524,7 +541,9 @@ def choose_scene_image(index, scene_text, topic, used_ids=None):
     image = generate_scene_image(
         scene_text=scene_text,
         topic=topic,
-        scene_number=index
+        scene_number=index,
+        scene_plan=scene_plan,
+        scene_index=scene_index
     )
 
     if image.size != (WIDTH, HEIGHT):
@@ -762,6 +781,10 @@ def main():
 
     clean_text = clean_script(script)
     scenes = split_scenes(clean_text)
+    plan = load_scene_plan()
+    if plan:
+        scenes = [str(s['narration']).strip() for s in plan['scenes']]
+        print('Scene plan loaded. Profile:', plan.get('profile', 'general'))
     if not scenes:
         raise RuntimeError("No scenes were generated.")
 
@@ -805,7 +828,8 @@ def main():
         print(scene_text)
 
         image, image_info = choose_scene_image(
-            index, scene_text, topic, used_ids
+            index, scene_text, topic, used_ids,
+            scene_plan=plan, scene_index=index - 1
         )
 
         image = add_scene_text(image, scene_text)

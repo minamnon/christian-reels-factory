@@ -28,6 +28,11 @@ on:
         description: "Facebook post hashtags"
         required: true
         type: string
+      scene_plan:
+        description: "Optional JSON scene plan"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -72,6 +77,7 @@ jobs:
           REEL_TOPIC: ${{ inputs.topic }}
           REEL_SCRIPT: ${{ inputs.script }}
           REEL_DURATION: ${{ inputs.duration_seconds }}
+          REEL_SCENE_PLAN: ${{ inputs.scene_plan }}
           FACEBOOK_TITLE: ${{ inputs.facebook_title }}
           FACEBOOK_CAPTION: ${{ inputs.facebook_caption }}
           FACEBOOK_HASHTAGS: ${{ inputs.facebook_hashtags }}

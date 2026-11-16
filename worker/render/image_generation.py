@@ -8,6 +8,14 @@ from io import BytesIO
 
 from PIL import Image, ImageFilter, ImageOps
 
+try:
+    from content_profiles import get_profile
+except ModuleNotFoundError as error:
+    if error.name != "content_profiles":
+        raise
+    from worker.render.content_profiles import get_profile
+
+
 
 MODEL = "@cf/black-forest-labs/flux-1-schnell"
 WIDTH = 1080
@@ -78,6 +86,30 @@ def build_image_prompt(scene_text, topic):
     if len(prompt) > 2048:
         raise RuntimeError("Image prompt exceeded the 2048-character limit.")
 
+    return prompt
+
+
+def build_plan_prompt(plan, scene_index):
+    profile = get_profile(plan.get("profile"))
+    scene = plan["scenes"][scene_index]
+    characters = plan.get("characters") or {}
+
+    parts = [str(scene["visual"])]
+    for key in scene.get("characters") or []:
+        description = characters.get(key)
+        if description:
+            parts.append(f"Character {key}: {description}")
+    setting = plan.get("setting")
+    if setting:
+        parts.append(f"Setting: {setting}")
+    parts.append(profile["style"])
+    parts.append(profile["rules"])
+
+    prompt = " ".join(" ".join(str(p).split()) for p in parts if p)
+    if len(prompt) > 2048:
+        raise RuntimeError(
+            f"Scene {scene_index + 1} prompt is {len(prompt)} characters; limit is 2048."
+        )
     return prompt
 
 
@@ -207,8 +239,13 @@ def _make_portrait_canvas(image):
     return background
 
 
-def generate_scene_image(scene_text, topic, scene_number=1):
-    prompt = build_image_prompt(scene_text, topic)
+def generate_scene_image(scene_text, topic, scene_number=1,
+                         scene_plan=None, scene_index=None):
+    if scene_plan is not None and scene_index is not None:
+        prompt = build_plan_prompt(scene_plan, scene_index)
+        print(f"FLUX prompt (scene {scene_number}):", prompt)
+    else:
+        prompt = build_image_prompt(scene_text, topic)
 
     print(
         f"Generating scene {scene_number} with "
