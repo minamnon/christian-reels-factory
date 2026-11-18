@@ -31,7 +31,7 @@ jobs:
       - name: Install MPFB
         run: |
           set -euo pipefail
-          blender --command extension install mpfb -e -s
+          blender --online-mode --command extension install mpfb -e -s
           blender --command extension list | tee /tmp/human-test/extensions.txt
           grep -qi mpfb /tmp/human-test/extensions.txt
 
