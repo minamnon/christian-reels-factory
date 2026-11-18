@@ -21,6 +21,7 @@ jobs:
             -o /tmp/blender.tar.xz
           tar -xJf /tmp/blender.tar.xz --strip-components=1 -C /opt/blender
           echo "/opt/blender" >> "$GITHUB_PATH"
+          export PATH="/opt/blender:$PATH"
           sudo apt-get update
           sudo apt-get install -y libegl1 ffmpeg espeak-ng unzip
           ldd /opt/blender/blender | tee /tmp/human-test/ldd.txt
