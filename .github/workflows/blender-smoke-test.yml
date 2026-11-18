@@ -1286,7 +1286,7 @@ jobs:
                       point.interpolation = "LINEAR"
 
               log("ANIMATION_CURVES", len(fcurves))
-              log("ANIMATION_SLOT", slot.name)
+              log("ANIMATION_SLOT", str(slot))
 
               if active_frames == 0:
                   raise RuntimeError("No non-silence visemes were animated")
