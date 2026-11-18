@@ -122,9 +122,11 @@ jobs:
           with wave.open(base+"/arabic.wav","rb") as wav:
               duration=wav.getnframes()/wav.getframerate()
           fps=24
-          end_frame=max(2,math.ceil(duration*fps))
+          # Short smoke render: maximum 24 frames (1 second).
+          end_frame=min(24,max(2,math.ceil(duration*fps)))
           scene=bpy.context.scene
           scene.render.engine="BLENDER_EEVEE_NEXT"
+          scene.eevee.taa_render_samples=8
           scene.render.resolution_x=480
           scene.render.resolution_y=854
           scene.render.resolution_percentage=100
