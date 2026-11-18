@@ -1079,6 +1079,358 @@ jobs:
             /tmp/human-test/face-proof.log
           retention-days: 3
 
+      - name: Animate MPFB face from Arabic Rhubarb cues
+        if: ${{ success() }}
+        run: |
+          set -euo pipefail
+
+          test -s /tmp/human-test/arabic.wav
+          test -s /tmp/human-test/cues.json
+          test -s /tmp/human-test/visemes02.zip
+
+          cat > /tmp/human-test/animate-visemes.py <<'PYTHON'
+          import bpy
+          import os
+          import sys
+          import json
+          import wave
+          import math
+          import importlib
+          import collections
+          import traceback
+          from mathutils import Vector
+
+          BASE = "/tmp/human-test"
+          OUT = BASE + "/viseme_frame_"
+          AUDIO = BASE + "/arabic.wav"
+          CUES_FILE = BASE + "/cues.json"
+          ZIP_FILE = BASE + "/visemes02.zip"
+
+          def log(*args):
+              print("[ANIMATED_VISEMES]", *args, flush=True)
+
+          def get_api(suffix, symbol):
+              for name in list(sys.modules):
+                  if name.endswith(suffix):
+                      mod = importlib.import_module(name)
+                      if hasattr(mod, symbol):
+                          return getattr(mod, symbol)
+              raise RuntimeError("MPFB API missing: " + suffix + "." + symbol)
+
+          try:
+              enabled = False
+              for module in ("bl_ext.blender_org.mpfb", "mpfb"):
+                  try:
+                      bpy.ops.preferences.addon_enable(module=module)
+                      enabled = True
+                      break
+                  except Exception:
+                      pass
+
+              if not enabled and not any("mpfb" in m.lower() for m in sys.modules):
+                  raise RuntimeError("MPFB extension could not be enabled")
+
+              HumanService = get_api(
+                  "mpfb.services.humanservice", "HumanService"
+              )
+              FaceService = get_api(
+                  "mpfb.services.faceservice", "FaceService"
+              )
+              AssetService = get_api(
+                  "mpfb.services.assetservice", "AssetService"
+              )
+              LocationService = get_api(
+                  "mpfb.services.locationservice", "LocationService"
+              )
+
+              problem = AssetService.check_asset_pack_zip(ZIP_FILE)
+              if problem:
+                  raise RuntimeError("Invalid Visemes02 ZIP: " + str(problem))
+
+              user_data = LocationService.get_user_data()
+              os.makedirs(user_data, exist_ok=True)
+
+              problem = AssetService.fix_and_extract_asset_pack_zip(
+                  ZIP_FILE, user_data
+              )
+              if problem:
+                  raise RuntimeError("Visemes02 install failed: " + str(problem))
+
+              bpy.ops.object.select_all(action="SELECT")
+              bpy.ops.object.delete(use_global=False)
+
+              human = HumanService.create_human()
+              if human is None or human.type != "MESH":
+                  raise RuntimeError("MPFB human creation failed")
+
+              FaceService.load_targets(
+                  human,
+                  load_microsoft_visemes=False,
+                  load_meta_visemes=True,
+                  load_arkit_faceunits=False
+              )
+
+              expected = [
+                  "viseme_sil", "viseme_PP", "viseme_FF", "viseme_TH",
+                  "viseme_DD", "viseme_kk", "viseme_CH", "viseme_SS",
+                  "viseme_nn", "viseme_RR", "viseme_aa", "viseme_E",
+                  "viseme_I", "viseme_O", "viseme_U"
+              ]
+
+              if not human.data.shape_keys:
+                  raise RuntimeError("MPFB did not create shape keys")
+
+              blocks = human.data.shape_keys.key_blocks
+              missing = [n for n in expected if n not in blocks]
+              if missing:
+                  raise RuntimeError("Missing viseme keys: " + repr(missing))
+
+              # Rhubarb's documented A-H/X mouth-shape families.
+              mapping = {
+                  "A": "viseme_PP",
+                  "B": "viseme_SS",
+                  "C": "viseme_E",
+                  "D": "viseme_aa",
+                  "E": "viseme_O",
+                  "F": "viseme_U",
+                  "G": "viseme_FF",
+                  "H": "viseme_DD",
+                  "X": "viseme_sil"
+              }
+
+              with open(CUES_FILE, encoding="utf-8") as f:
+                  cues = json.load(f)["mouthCues"]
+
+              if not cues:
+                  raise RuntimeError("Rhubarb returned no mouth cues")
+
+              counts = collections.Counter()
+              for cue in cues:
+                  value = str(cue["value"]).upper()
+                  if value not in mapping:
+                      raise RuntimeError("Unknown Rhubarb cue: " + value)
+                  if float(cue["end"]) < float(cue["start"]):
+                      raise RuntimeError("Invalid cue timing: " + repr(cue))
+                  counts[value] += 1
+
+              with wave.open(AUDIO, "rb") as wav:
+                  audio_duration = wav.getnframes() / wav.getframerate()
+
+              fps = 24
+              duration = min(4.0, audio_duration)
+              if duration <= 0.5:
+                  raise RuntimeError("Audio clip is too short")
+
+              end_frame = max(2, math.ceil(duration * fps))
+              scene = bpy.context.scene
+
+              # Apply a neutral material to make facial motion visible.
+              skin = bpy.data.materials.new("Lip Sync Test Skin")
+              skin.diffuse_color = (0.55, 0.34, 0.25, 1.0)
+              skin.use_nodes = True
+              bsdf = skin.node_tree.nodes.get("Principled BSDF")
+              if bsdf:
+                  bsdf.inputs["Base Color"].default_value = (0.55, 0.34, 0.25, 1.0)
+                  bsdf.inputs["Roughness"].default_value = 0.68
+
+              human.data.materials.clear()
+              human.data.materials.append(skin)
+
+              # Animate the actual MPFB facial shape keys, not a separate mouth object.
+              key_names = [n for n in expected if n != "viseme_sil"]
+              cue_index = 0
+              active_frames = 0
+
+              for frame in range(1, end_frame + 1):
+                  t = (frame - 1) / fps
+
+                  while cue_index + 1 < len(cues) and t >= float(cues[cue_index]["end"]):
+                      cue_index += 1
+
+                  cue = cues[cue_index]
+                  selected = "viseme_sil"
+
+                  if float(cue["start"]) <= t < float(cue["end"]):
+                      selected = mapping[str(cue["value"]).upper()]
+
+                  if selected != "viseme_sil":
+                      active_frames += 1
+
+                  for name in expected:
+                      key = blocks[name]
+                      key.value = 1.0 if name == selected else 0.0
+                      key.keyframe_insert(data_path="value", frame=frame)
+
+              anim_data = human.data.shape_keys.animation_data
+              if not anim_data or not anim_data.action:
+                  raise RuntimeError("Shape-key animation was not created")
+
+              action = anim_data.action
+              slot = anim_data.action_slot
+              if slot is None:
+                  raise RuntimeError("Shape-key Action has no animation slot")
+
+              from bpy_extras import anim_utils
+              channelbag = anim_utils.action_get_channelbag_for_slot(
+                  action, slot
+              )
+              if channelbag is None:
+                  raise RuntimeError("Shape-key Action channelbag is missing")
+
+              fcurves = list(channelbag.fcurves)
+              if not fcurves:
+                  raise RuntimeError("No shape-key animation F-curves found")
+
+              for fc in fcurves:
+                  for point in fc.keyframe_points:
+                      point.interpolation = "LINEAR"
+
+              log("ANIMATION_CURVES", len(fcurves))
+              log("ANIMATION_SLOT", slot.name)
+
+              if active_frames == 0:
+                  raise RuntimeError("No non-silence visemes were animated")
+
+              corners = [
+                  human.matrix_world @ Vector(c) for c in human.bound_box
+              ]
+              lo = Vector((
+                  min(v.x for v in corners),
+                  min(v.y for v in corners),
+                  min(v.z for v in corners)
+              ))
+              hi = Vector((
+                  max(v.x for v in corners),
+                  max(v.y for v in corners),
+                  max(v.z for v in corners)
+              ))
+              height = hi.z - lo.z
+
+              if height < 1:
+                  raise RuntimeError("Invalid MPFB human dimensions")
+
+              target = Vector((
+                  (lo.x + hi.x) / 2,
+                  lo.y,
+                  lo.z + height * 0.88
+              ))
+
+              bpy.ops.object.camera_add(
+                  location=(
+                      target.x,
+                      lo.y - height * 0.48,
+                      target.z + height * 0.015
+                  )
+              )
+              camera = bpy.context.object
+              camera.rotation_euler = (
+                  target - camera.location
+              ).to_track_quat("-Z", "Y").to_euler()
+              camera.data.lens = 70
+              camera.data.clip_end = height * 20
+              scene.camera = camera
+
+              bpy.ops.object.light_add(
+                  type="AREA",
+                  location=(
+                      target.x - height * 0.18,
+                      lo.y - height * 0.28,
+                      target.z + height * 0.14
+                  )
+              )
+              light = bpy.context.object
+              light.data.energy = 250
+              light.data.size = height * 0.18
+              light.rotation_euler = (
+                  target - light.location
+              ).to_track_quat("-Z", "Y").to_euler()
+
+              scene.render.engine = "BLENDER_EEVEE_NEXT"
+              scene.eevee.taa_render_samples = 2
+              scene.render.resolution_x = 480
+              scene.render.resolution_y = 854
+              scene.render.resolution_percentage = 100
+              scene.render.fps = fps
+              scene.frame_start = 1
+              scene.frame_end = end_frame
+              scene.render.image_settings.file_format = "PNG"
+              scene.render.filepath = OUT
+              scene.world.color = (0.12, 0.12, 0.12)
+
+              log("HUMAN", human.name, "VERTICES", len(human.data.vertices))
+              log("VISEME_KEYS", len(expected))
+              log("CUE_COUNTS", dict(counts))
+              log("AUDIO_DURATION", round(audio_duration, 3))
+              log("TEST_DURATION", round(duration, 3))
+              log("ANIMATED_FRAMES", end_frame)
+              log("NON_SILENCE_FRAMES", active_frames)
+
+              bpy.ops.render.render(animation=True)
+
+              with open(BASE + "/clip-duration.txt", "w") as f:
+                  f.write(str(duration))
+
+              log("MPFB_ARABIC_VISEME_ANIMATION_SUCCESS")
+
+          except Exception:
+              traceback.print_exc()
+              log("MPFB_ARABIC_VISEME_ANIMATION_FAILED")
+              sys.exit(1)
+          PYTHON
+
+          blender --background --python /tmp/human-test/animate-visemes.py \
+            2>&1 | tee /tmp/human-test/viseme-animation.log
+
+          grep -q MPFB_ARABIC_VISEME_ANIMATION_SUCCESS \
+            /tmp/human-test/viseme-animation.log
+
+          DURATION="$(cat /tmp/human-test/clip-duration.txt)"
+
+          EXPECTED_FRAMES="$(python3 -c 'import math,sys; print(max(2, math.ceil(float(sys.argv[1]) * 24)))' "$DURATION")"
+          ACTUAL_FRAMES="$(find /tmp/human-test -maxdepth 1 -type f -name 'viseme_frame_*.png' | wc -l | tr -d ' ')"
+
+          echo "EXPECTED_FRAMES=$EXPECTED_FRAMES"
+          echo "ACTUAL_FRAMES=$ACTUAL_FRAMES"
+
+          test "$ACTUAL_FRAMES" -eq "$EXPECTED_FRAMES"
+          test -s /tmp/human-test/viseme_frame_0001.png
+
+          LAST_FRAME="$(printf '%04d' "$EXPECTED_FRAMES")"
+          test -s "/tmp/human-test/viseme_frame_${LAST_FRAME}.png"
+
+          echo "FRAME_SEQUENCE_VALIDATED"
+
+          ffmpeg -y \
+            -framerate 24 \
+            -start_number 1 \
+            -i /tmp/human-test/viseme_frame_%04d.png \
+            -i /tmp/human-test/arabic.wav \
+            -t "$DURATION" \
+            -c:v libx264 -preset veryfast -pix_fmt yuv420p \
+            -c:a aac -b:a 128k -shortest -movflags +faststart \
+            /tmp/human-test/mpfb-arabic-visemes.mp4
+
+          ffprobe -v error \
+            -show_entries format=duration \
+            -show_entries stream=codec_name,width,height,r_frame_rate \
+            -of json /tmp/human-test/mpfb-arabic-visemes.mp4 \
+            | tee /tmp/human-test/video-info.json
+
+          test -s /tmp/human-test/mpfb-arabic-visemes.mp4
+          echo "MPFB_ARABIC_VISEME_VIDEO_SUCCESS"
+
+      - name: Upload MPFB Arabic viseme animation
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpfb-arabic-viseme-animation
+          path: |
+            /tmp/human-test/mpfb-arabic-visemes.mp4
+            /tmp/human-test/viseme-animation.log
+            /tmp/human-test/video-info.json
+            /tmp/human-test/cues.json
+          retention-days: 3
+
       - name: Encode and validate video
         if: ${{ false }}
         run: |
