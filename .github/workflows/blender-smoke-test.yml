@@ -461,7 +461,7 @@ jobs:
             echo '```text'
             cat "$LOG"
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
           if [ "$rc" -ne 0 ]; then
             echo "MPFB exploration failed with exit code $rc"
