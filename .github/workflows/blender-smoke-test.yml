@@ -862,6 +862,204 @@ jobs:
           { echo '```text'; grep -F '[DIAG]' /tmp/human-test/render.log || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           grep -q HUMAN_DIAG_COMPLETE /tmp/human-test/render.log
 
+      - name: Prove MPFB Meta visemes deform the human mesh
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/human-test/face-proof
+
+          curl -fL --retry 3 \
+            https://files2.makehumancommunity.org/functional/visemes02.zip \
+            -o /tmp/human-test/visemes02.zip
+
+          cat > /tmp/human-test/face-proof.py <<'PYTHON'
+          import bpy, sys, os, importlib, traceback
+          from mathutils import Vector
+
+          BASE = "/tmp/human-test"
+          OUT = BASE + "/face-proof"
+          os.makedirs(OUT, exist_ok=True)
+
+          def log(*args):
+              print("[FACE_PROOF]", *args, flush=True)
+
+          def get_api(suffix, symbol):
+              for name in list(sys.modules):
+                  if name.endswith(suffix):
+                      mod = importlib.import_module(name)
+                      if hasattr(mod, symbol):
+                          return getattr(mod, symbol)
+              raise RuntimeError("MPFB API missing: " + suffix + "." + symbol)
+
+          enabled = False
+          for module in ("bl_ext.blender_org.mpfb", "mpfb"):
+              try:
+                  bpy.ops.preferences.addon_enable(module=module)
+                  enabled = True
+                  break
+              except Exception:
+                  pass
+
+          if not enabled and not any("mpfb" in m.lower() for m in sys.modules):
+              raise RuntimeError("MPFB extension could not be enabled")
+
+          HumanService = get_api("mpfb.services.humanservice", "HumanService")
+          FaceService = get_api("mpfb.services.faceservice", "FaceService")
+          AssetService = get_api("mpfb.services.assetservice", "AssetService")
+          LocationService = get_api("mpfb.services.locationservice", "LocationService")
+
+          # Install the official Visemes 02 asset pack into MPFB user data.
+          zip_path = BASE + "/visemes02.zip"
+          problem = AssetService.check_asset_pack_zip(zip_path)
+          if problem:
+              raise RuntimeError("Invalid Visemes 02 asset pack: " + str(problem))
+
+          user_data = LocationService.get_user_data()
+          os.makedirs(user_data, exist_ok=True)
+          problem = AssetService.fix_and_extract_asset_pack_zip(zip_path, user_data)
+          if problem:
+              raise RuntimeError("Visemes 02 installation failed: " + str(problem))
+
+          log("ASSET_PACK_INSTALLED", user_data)
+
+          # Create a fresh MPFB human basemesh.
+          bpy.ops.object.select_all(action="SELECT")
+          bpy.ops.object.delete(use_global=False)
+
+          human = HumanService.create_human()
+          if human is None or human.type != "MESH" or len(human.data.vertices) < 1000:
+              raise RuntimeError("MPFB human creation failed")
+
+          log("HUMAN_CREATED", human.name, "vertices", len(human.data.vertices))
+
+          # Load Meta/Oculus visemes only; no audio or production voice is involved.
+          FaceService.load_targets(
+              human,
+              load_microsoft_visemes=False,
+              load_meta_visemes=True,
+              load_arkit_faceunits=False
+          )
+
+          expected = [
+              "viseme_sil", "viseme_PP", "viseme_FF", "viseme_TH",
+              "viseme_DD", "viseme_kk", "viseme_CH", "viseme_SS",
+              "viseme_nn", "viseme_RR", "viseme_aa", "viseme_E",
+              "viseme_I", "viseme_O", "viseme_U"
+          ]
+
+          if not human.data.shape_keys:
+              raise RuntimeError("No shape keys were created")
+
+          blocks = human.data.shape_keys.key_blocks
+          missing = [name for name in expected if name not in blocks]
+          if missing:
+              raise RuntimeError("Missing Meta viseme shape keys: " + repr(missing))
+
+          basis = blocks["Basis"]
+          results = {}
+
+          # Verify actual vertex deformation for every non-silence viseme.
+          for name in expected:
+              key = blocks[name]
+              moved = 0
+              max_delta = 0.0
+
+              for i in range(len(basis.data)):
+                  delta = (key.data[i].co - basis.data[i].co).length
+                  if delta > 0.00001:
+                      moved += 1
+                  if delta > max_delta:
+                      max_delta = delta
+
+              results[name] = (moved, max_delta)
+              log("SHAPE_KEY", name, "changed_vertices", moved,
+                  "max_delta", round(max_delta, 7))
+
+              if name != "viseme_sil" and (moved == 0 or max_delta <= 0.0001):
+                  raise RuntimeError("Viseme has no measurable face deformation: " + name)
+
+          log("ALL_15_KEYS_PRESENT", len(expected))
+          log("ALL_NON_SILENCE_KEYS_DEFORM_MESH", 14)
+
+          # Prepare a close-up proof render of representative mouth shapes.
+          for key in blocks:
+              if key.name != "Basis":
+                  key.value = 0.0
+
+          bpy.context.view_layer.update()
+
+          corners = [human.matrix_world @ Vector(c) for c in human.bound_box]
+          lo = Vector((min(v.x for v in corners), min(v.y for v in corners), min(v.z for v in corners)))
+          hi = Vector((max(v.x for v in corners), max(v.y for v in corners), max(v.z for v in corners)))
+          height = hi.z - lo.z
+          if height < 1:
+              raise RuntimeError("Invalid human dimensions")
+
+          target = Vector(((lo.x + hi.x) / 2, lo.y, lo.z + height * 0.88))
+
+          bpy.ops.object.camera_add(
+              location=(target.x, lo.y - height * 0.48, target.z + height * 0.015)
+          )
+          camera = bpy.context.object
+          camera.rotation_euler = (target - camera.location).to_track_quat("-Z", "Y").to_euler()
+          camera.data.lens = 70
+          camera.data.clip_end = height * 20
+
+          scene = bpy.context.scene
+          scene.camera = camera
+          scene.render.engine = "BLENDER_EEVEE_NEXT"
+          scene.eevee.taa_render_samples = 8
+          scene.render.resolution_x = 640
+          scene.render.resolution_y = 640
+          scene.render.resolution_percentage = 100
+          scene.render.image_settings.file_format = "PNG"
+          scene.render.film_transparent = False
+          scene.world.color = (0.12, 0.12, 0.12)
+
+          bpy.ops.object.light_add(
+              type="AREA",
+              location=(target.x - height * 0.18, lo.y - height * 0.28,
+                        target.z + height * 0.14)
+          )
+          light = bpy.context.object
+          light.data.energy = 500
+          light.data.size = height * 0.18
+          light.rotation_euler = (target - light.location).to_track_quat("-Z", "Y").to_euler()
+
+          # Render silence plus four clearly different mouth positions.
+          proof_keys = ["viseme_sil", "viseme_aa", "viseme_PP", "viseme_FF", "viseme_O"]
+
+          for name in proof_keys:
+              for key in blocks:
+                  if key.name != "Basis":
+                      key.value = 0.0
+
+              if name != "viseme_sil":
+                  blocks[name].value = 1.0
+
+              bpy.context.view_layer.update()
+              scene.render.filepath = OUT + "/" + name + ".png"
+              bpy.ops.render.render(write_still=True)
+              log("RENDERED", name, scene.render.filepath)
+
+          log("MPFB_FACE_PROOF_SUCCESS")
+          PYTHON
+
+          blender --background --python /tmp/human-test/face-proof.py \
+            2>&1 | tee /tmp/human-test/face-proof.log
+
+          grep -q MPFB_FACE_PROOF_SUCCESS /tmp/human-test/face-proof.log
+          test "$(find /tmp/human-test/face-proof -maxdepth 1 -name '*.png' | wc -l)" -eq 5
+
+      - name: Upload MPFB face proof
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpfb-viseme-face-proof
+          path: |
+            /tmp/human-test/face-proof/
+            /tmp/human-test/face-proof.log
+          retention-days: 3
+
       - name: Encode and validate video
         if: ${{ false }}
         run: |
