@@ -16,9 +16,28 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /opt/blender /tmp/human-test
-          curl -fL --retry 3 \
-            https://download.blender.org/release/Blender4.5/blender-4.5.16-linux-x64.tar.xz \
-            -o /tmp/blender.tar.xz
+          BLENDER_FILE="blender-4.5.16-linux-x64.tar.xz"
+          BLENDER_URLS=(
+            "https://mirror.blender.org/release/Blender4.5/${BLENDER_FILE}"
+            "https://mirror.nju.edu.cn/blender/release/Blender4.5/${BLENDER_FILE}"
+          )
+
+          downloaded=0
+          for url in "${BLENDER_URLS[@]}"; do
+            echo "Trying Blender mirror: ${url}"
+          if curl -fL --retry 2 --retry-all-errors --retry-delay 2 "$url" -o /tmp/blender.tar.xz && xz -t /tmp/blender.tar.xz; then
+              downloaded=1
+              echo "BLENDER_DOWNLOAD_OK ${url}"
+              break
+            fi
+            rm -f /tmp/blender.tar.xz
+            echo "Mirror failed; trying the next one."
+          done
+
+          if [ "$downloaded" -ne 1 ]; then
+            echo "ERROR: All Blender download mirrors failed."
+            exit 1
+          fi
           tar -xJf /tmp/blender.tar.xz --strip-components=1 -C /opt/blender
           echo "/opt/blender" >> "$GITHUB_PATH"
           export PATH="/opt/blender:$PATH"
@@ -36,7 +55,7 @@ jobs:
           grep -qi mpfb /tmp/human-test/extensions.txt
 
       - name: Explore MPFB face API (read-only)
-        if: ${{ !cancelled() }}
+        if: ${{ success() }}
         run: |
           set -uo pipefail
           LOG=/tmp/human-test/explore.log
