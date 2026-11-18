@@ -1,0 +1,175 @@
+name: Blender Headless Smoke Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  blender-smoke-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Install Blender and FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y blender ffmpeg
+
+      - name: Check tools
+        run: |
+          blender --version
+          ffmpeg -version | head -n 2
+          ffprobe -version | head -n 1
+
+      - name: Create animated character test
+        run: |
+          mkdir -p /tmp/blender-smoke
+
+          cat > /tmp/blender_smoke.py <<'PY'
+          import bpy
+          import math
+          import os
+          from mathutils import Vector
+
+          bpy.ops.object.select_all(action="SELECT")
+          bpy.ops.object.delete(use_global=False)
+
+          scene = bpy.context.scene
+          try:
+              scene.render.engine = "BLENDER_EEVEE_NEXT"
+          except TypeError:
+              scene.render.engine = "BLENDER_EEVEE"
+          scene.render.resolution_x = 320
+          scene.render.resolution_y = 320
+          scene.render.resolution_percentage = 100
+          scene.render.fps = 12
+          scene.frame_start = 1
+          scene.frame_end = 36
+          scene.render.image_settings.file_format = "PNG"
+          scene.render.filepath = "/tmp/blender-smoke/frame_"
+
+          def material(name, color):
+              mat = bpy.data.materials.new(name)
+              mat.diffuse_color = (*color, 1)
+              return mat
+
+          skin = material("Skin", (0.72, 0.42, 0.27))
+          shirt = material("Blue Shirt", (0.08, 0.25, 0.65))
+          dark = material("Dark", (0.025, 0.02, 0.025))
+          white = material("White", (0.95, 0.95, 0.9))
+          floor_mat = material("Floor", (0.12, 0.14, 0.18))
+
+          def sphere(name, location, scale, mat):
+              bpy.ops.mesh.primitive_uv_sphere_add(
+                  segments=24, ring_count=16, location=location
+              )
+              obj = bpy.context.object
+              obj.name = name
+              obj.scale = scale
+              bpy.ops.object.shade_smooth()
+              obj.data.materials.append(mat)
+              return obj
+
+          def cube(name, location, scale, mat):
+              bpy.ops.mesh.primitive_cube_add(size=1, location=location)
+              obj = bpy.context.object
+              obj.name = name
+              obj.dimensions = scale
+              bpy.ops.object.transform_apply(
+                  location=False, rotation=False, scale=True
+              )
+              obj.data.materials.append(mat)
+              return obj
+
+          # Simple stylized human character
+          sphere("Torso", (0, 0, 1.05), (0.48, 0.28, 0.65), shirt)
+          sphere("Head", (0, 0, 1.95), (0.38, 0.34, 0.43), skin)
+
+          sphere("Left Eye", (-0.14, -0.30, 2.04), (0.055, 0.035, 0.07), white)
+          sphere("Right Eye", (0.14, -0.30, 2.04), (0.055, 0.035, 0.07), white)
+          sphere("Left Pupil", (-0.14, -0.332, 2.04), (0.025, 0.018, 0.04), dark)
+          sphere("Right Pupil", (0.14, -0.332, 2.04), (0.025, 0.018, 0.04), dark)
+
+          mouth = sphere("Animated Mouth", (0, -0.335, 1.83), (0.105, 0.025, 0.025), dark)
+
+          arm = cube("Animated Arm", (0.58, 0, 1.38), (0.20, 0.20, 0.75), skin)
+          arm.rotation_euler[1] = math.radians(-20)
+
+          sphere("Hand", (0.58, 0, 1.0), (0.13, 0.13, 0.13), skin)
+
+          # Arm movement
+          for frame, angle in [(1, -20), (12, 35), (24, -10), (36, 35)]:
+              arm.rotation_euler[1] = math.radians(angle)
+              arm.keyframe_insert(data_path="rotation_euler", frame=frame)
+
+          # Basic mouth movement to simulate speech
+          for frame, height in [(1, 0.5), (6, 1.8), (12, 0.6),
+                                (18, 2.0), (24, 0.5), (30, 1.7), (36, 0.5)]:
+              mouth.scale.z = 0.025 * height
+              mouth.keyframe_insert(data_path="scale", frame=frame)
+
+          # Floor
+          bpy.ops.mesh.primitive_plane_add(size=200, location=(0, 0, 0))
+          bpy.context.object.data.materials.append(floor_mat)
+
+          # Camera
+          bpy.ops.object.camera_add(location=(3.8, -7, 2.7))
+          camera = bpy.context.object
+          direction = Vector((0, 0, 1.2)) - camera.location
+          camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
+          camera.data.type = "ORTHO"
+          camera.data.ortho_scale = 3.4
+          scene.camera = camera
+
+          # Lighting
+          bpy.ops.object.light_add(type="AREA", location=(1, -4, 5))
+          light = bpy.context.object
+          light.data.energy = 450
+          light.data.shape = "DISK"
+          light.data.size = 5
+
+          scene.world.color = (0.12, 0.12, 0.12)
+          scene.render.image_settings.color_mode = "RGB"
+
+          # Smooth animation interpolation
+          for obj in scene.objects:
+              if obj.animation_data and obj.animation_data.action:
+                  for curve in obj.animation_data.action.fcurves:
+                      for key in curve.keyframe_points:
+                          key.interpolation = "BEZIER"
+
+          os.makedirs("/tmp/blender-smoke", exist_ok=True)
+          scene.frame_set(1)
+          bpy.ops.render.render(animation=True)
+          print("BLENDER_SMOKE_RENDER_COMPLETE")
+          PY
+
+          blender --background --python /tmp/blender_smoke.py
+
+      - name: Encode and validate MP4
+        run: |
+          ffmpeg -y \
+            -framerate 12 \
+            -i /tmp/blender-smoke/frame_%04d.png \
+            -c:v libx264 \
+            -pix_fmt yuv420p \
+            -movflags +faststart \
+            /tmp/blender-smoke/blender-smoke-test.mp4
+
+          ffprobe -v error \
+            -show_entries format=duration \
+            -show_entries stream=codec_name,width,height,r_frame_rate \
+            -of json \
+            /tmp/blender-smoke/blender-smoke-test.mp4
+
+          test -s /tmp/blender-smoke/blender-smoke-test.mp4
+          echo "BLENDER_SMOKE_TEST_SUCCESS"
+
+      - name: Upload test video
+        uses: actions/upload-artifact@v4
+        with:
+          name: blender-headless-smoke-test
+          path: /tmp/blender-smoke/blender-smoke-test.mp4
+          retention-days: 3
