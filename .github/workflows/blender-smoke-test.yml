@@ -1,4 +1,4 @@
-name: Blender Headless Smoke Test
+name: Blender Human Arabic Lip Sync Test
 
 on:
   workflow_dispatch:
@@ -7,192 +7,211 @@ permissions:
   contents: read
 
 jobs:
-  blender-smoke-test:
+  human-lipsync:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
-      - name: Install Blender and FFmpeg
+      - name: Install Blender and dependencies
         run: |
-          set -e
-          mkdir -p /opt/blender
-
-          curl -fL --retry 3 --retry-delay 2 \
-            --connect-timeout 20 \
+          set -euo pipefail
+          mkdir -p /opt/blender /tmp/human-test
+          curl -fL --retry 3 \
             https://download.blender.org/release/Blender4.5/blender-4.5.16-linux-x64.tar.xz \
             -o /tmp/blender.tar.xz
-
-          tar -xJf /tmp/blender.tar.xz \
-            --strip-components=1 -C /opt/blender
-
+          tar -xJf /tmp/blender.tar.xz --strip-components=1 -C /opt/blender
           echo "/opt/blender" >> "$GITHUB_PATH"
-
           sudo apt-get update
-          sudo apt-get install -y libegl1
-
-          if ! command -v ffmpeg >/dev/null 2>&1; then
-            sudo apt-get install -y ffmpeg
-          fi
-
-          if ldd /opt/blender/blender | grep -q "not found"; then
-            echo "Missing Blender shared libraries:"
-            ldd /opt/blender/blender | grep "not found"
-            exit 1
-          fi
-
-      - name: Check tools
-        run: |
+          sudo apt-get install -y libegl1 ffmpeg espeak-ng unzip
+          ldd /opt/blender/blender | tee /tmp/human-test/ldd.txt
+          ! grep -q "not found" /tmp/human-test/ldd.txt
           blender --version
-          ffmpeg -version | head -n 2
-          ffprobe -version | head -n 1
 
-      - name: Create animated character test
+      - name: Install MPFB
         run: |
-          mkdir -p /tmp/blender-smoke
+          set -euo pipefail
+          blender --command extension install mpfb -e -s
+          blender --command extension list | tee /tmp/human-test/extensions.txt
+          grep -qi mpfb /tmp/human-test/extensions.txt
 
-          cat > /tmp/blender_smoke.py <<'PY'
-          import bpy
-          import math
-          import os
+      - name: Generate Arabic speech and Rhubarb cues
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 \
+            https://github.com/DanielSWolf/rhubarb-lip-sync/releases/download/v1.14.0/Rhubarb-Lip-Sync-1.14.0-Linux.zip \
+            -o /tmp/human-test/rhubarb.zip
+          unzip -q /tmp/human-test/rhubarb.zip -d /tmp/human-test/rhubarb
+          RHUBARB="$(find /tmp/human-test/rhubarb -type f -name rhubarb -perm -u+x | head -n 1)"
+          test -n "$RHUBARB"
+          espeak-ng -v ar -s 132 -w /tmp/human-test/arabic.wav \
+            "مرحباً بكم. اليوم سنتعلم كيف يمكن للشخصية أن تتحرك وتتحدث بشكل طبيعي."
+          test -s /tmp/human-test/arabic.wav
+          "$RHUBARB" -r phonetic -f json \
+            -o /tmp/human-test/cues.json /tmp/human-test/arabic.wav
+          python3 -c 'import json; d=json.load(open("/tmp/human-test/cues.json")); assert d.get("mouthCues"), "No Arabic mouth cues"; print("Arabic mouth cues:",len(d["mouthCues"]))'
+
+      - name: Create and animate MPFB human
+        run: |
+          set -euo pipefail
+          cat > /tmp/human-test/create.py <<'PY'
+          import bpy, sys, json, importlib, math, wave
           from mathutils import Vector
 
+          base="/tmp/human-test"
+          cues=json.load(open(base+"/cues.json",encoding="utf-8"))["mouthCues"]
+
+          # Enable MPFB extension in background mode.
+          enabled=False
+          for module in ("bl_ext.blender_org.mpfb","mpfb"):
+              try:
+                  bpy.ops.preferences.addon_enable(module=module)
+                  enabled=True
+                  break
+              except Exception:
+                  pass
+          if not enabled and not any("mpfb" in m.lower() for m in sys.modules):
+              raise RuntimeError("MPFB extension could not be enabled")
+
+          def get_api(suffix,symbol):
+              for name in list(sys.modules):
+                  if name.endswith(suffix):
+                      mod=importlib.import_module(name)
+                      if hasattr(mod,symbol):
+                          return getattr(mod,symbol)
+              raise RuntimeError("MPFB API missing: "+suffix)
+
+          HumanService=get_api("mpfb.services.humanservice","HumanService")
           bpy.ops.object.select_all(action="SELECT")
           bpy.ops.object.delete(use_global=False)
 
-          scene = bpy.context.scene
-          try:
-              scene.render.engine = "BLENDER_EEVEE_NEXT"
-          except TypeError:
-              scene.render.engine = "BLENDER_EEVEE"
-          scene.render.resolution_x = 320
-          scene.render.resolution_y = 320
-          scene.render.resolution_percentage = 100
-          scene.render.fps = 12
-          scene.frame_start = 1
-          scene.frame_end = 36
-          scene.render.image_settings.file_format = "PNG"
-          scene.render.filepath = "/tmp/blender-smoke/frame_"
+          human=HumanService.create_human()
+          if human is None or human.type!="MESH" or len(human.data.vertices)<1000:
+              raise RuntimeError("MPFB did not create a full human mesh")
 
-          def material(name, color):
-              mat = bpy.data.materials.new(name)
-              mat.diffuse_color = (*color, 1)
-              return mat
+          rig=HumanService.add_builtin_rig(human,"default")
+          if rig is None or rig.type!="ARMATURE":
+              raise RuntimeError("MPFB default rig creation failed")
 
-          skin = material("Skin", (0.72, 0.42, 0.27))
-          shirt = material("Blue Shirt", (0.08, 0.25, 0.65))
-          dark = material("Dark", (0.025, 0.02, 0.025))
-          white = material("White", (0.95, 0.95, 0.9))
-          floor_mat = material("Floor", (0.12, 0.14, 0.18))
+          # Simple skin material; no optional asset packs or production files.
+          mat=bpy.data.materials.new("Test Human Skin")
+          mat.diffuse_color=(0.48,0.25,0.16,1)
+          mat.use_nodes=True
+          mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value=(0.48,0.25,0.16,1)
+          human.data.materials.clear()
+          human.data.materials.append(mat)
 
-          def sphere(name, location, scale, mat):
-              bpy.ops.mesh.primitive_uv_sphere_add(
-                  segments=24, ring_count=16, location=location
-              )
-              obj = bpy.context.object
-              obj.name = name
-              obj.scale = scale
-              bpy.ops.object.shade_smooth()
-              obj.data.materials.append(mat)
-              return obj
+          bpy.context.view_layer.update()
+          corners=[human.matrix_world @ Vector(c) for c in human.bound_box]
+          lo=Vector((min(v.x for v in corners),min(v.y for v in corners),min(v.z for v in corners)))
+          hi=Vector((max(v.x for v in corners),max(v.y for v in corners),max(v.z for v in corners)))
+          h=hi.z-lo.z
+          if h<1:
+              raise RuntimeError("Invalid human dimensions")
 
-          def cube(name, location, scale, mat):
-              bpy.ops.mesh.primitive_cube_add(size=1, location=location)
-              obj = bpy.context.object
-              obj.name = name
-              obj.dimensions = scale
-              bpy.ops.object.transform_apply(
-                  location=False, rotation=False, scale=True
-              )
-              obj.data.materials.append(mat)
-              return obj
+          # Audio-timed mouth aperture, driven by Rhubarb's detected cues.
+          bpy.ops.mesh.primitive_uv_sphere_add(segments=32,ring_count=16,
+              location=((lo.x+hi.x)/2,lo.y-0.012,lo.z+h*0.865))
+          mouth=bpy.context.object
+          mouth.name="Arabic Audio Driven Mouth"
+          mouth.scale=(h*0.030,h*0.003,h*0.004)
+          mm=bpy.data.materials.new("Mouth Interior")
+          mm.diffuse_color=(0.025,0.004,0.008,1)
+          mouth.data.materials.append(mm)
 
-          # Simple stylized human character
-          sphere("Torso", (0, 0, 1.05), (0.48, 0.28, 0.65), shirt)
-          sphere("Head", (0, 0, 1.95), (0.38, 0.34, 0.43), skin)
+          with wave.open(base+"/arabic.wav","rb") as wav:
+              duration=wav.getnframes()/wav.getframerate()
+          fps=24
+          end_frame=max(2,math.ceil(duration*fps))
+          scene=bpy.context.scene
+          scene.render.engine="BLENDER_EEVEE_NEXT"
+          scene.render.resolution_x=480
+          scene.render.resolution_y=854
+          scene.render.resolution_percentage=100
+          scene.render.fps=fps
+          scene.frame_start=1
+          scene.frame_end=end_frame
+          scene.render.image_settings.file_format="PNG"
+          scene.render.filepath=base+"/frame_"
 
-          sphere("Left Eye", (-0.14, -0.30, 2.04), (0.055, 0.035, 0.07), white)
-          sphere("Right Eye", (0.14, -0.30, 2.04), (0.055, 0.035, 0.07), white)
-          sphere("Left Pupil", (-0.14, -0.332, 2.04), (0.025, 0.018, 0.04), dark)
-          sphere("Right Pupil", (0.14, -0.332, 2.04), (0.025, 0.018, 0.04), dark)
+          # Animate a real arm bone and torso bone on the MPFB skeleton.
+          names=set(rig.data.bones.keys())
+          arm_name=next((n for n in ("upper_arm.L","upperarm.L","upper_arm.R","upperarm.R") if n in names),None)
+          if not arm_name:
+              raise RuntimeError("MPFB upper-arm bone was not found")
+          frames=[1,max(2,end_frame//3),max(3,2*end_frame//3),end_frame]
+          arm=rig.pose.bones[arm_name]
+          arm.rotation_mode="XYZ"
+          for f,a in zip(frames,(-0.08,0.55,-0.18,0.35)):
+              arm.rotation_euler[1]=a
+              arm.keyframe_insert(data_path="rotation_euler",frame=f)
 
-          mouth = sphere("Animated Mouth", (0, -0.335, 1.83), (0.105, 0.025, 0.025), dark)
+          spine_name=next((n for n in ("spine","spine1","spine_01") if n in names),None)
+          if spine_name:
+              spine=rig.pose.bones[spine_name]
+              spine.rotation_mode="XYZ"
+              for f,a in zip(frames,(0,0.035,-0.025,0)):
+                  spine.rotation_euler[1]=a
+                  spine.keyframe_insert(data_path="rotation_euler",frame=f)
 
-          arm = cube("Animated Arm", (0.58, 0, 1.38), (0.20, 0.20, 0.75), skin)
-          arm.rotation_euler[1] = math.radians(-20)
+          aperture={"X":0.10,"A":0.25,"B":0.42,"C":0.62,"D":0.95,
+                    "E":0.82,"F":0.72,"G":0.56,"H":0.38}
+          for cue in cues:
+              start=max(1,round(float(cue["start"])*fps)+1)
+              end=max(start+1,round(float(cue["end"])*fps)+1)
+              amount=aperture.get(str(cue["value"]).upper(),0.15)
+              for f,value in ((start,amount),(end,0.10)):
+                  mouth.scale.z=h*0.004*max(0.15,value)
+                  mouth.keyframe_insert(data_path="scale",frame=f)
 
-          sphere("Hand", (0.58, 0, 1.0), (0.13, 0.13, 0.13), skin)
+          if not mouth.animation_data or not mouth.animation_data.action:
+              raise RuntimeError("No audio-driven mouth animation was created")
 
-          # Arm movement
-          for frame, angle in [(1, -20), (12, 35), (24, -10), (36, 35)]:
-              arm.rotation_euler[1] = math.radians(angle)
-              arm.keyframe_insert(data_path="rotation_euler", frame=frame)
+          target=Vector(((lo.x+hi.x)/2,(lo.y+hi.y)/2,lo.z+h*0.72))
+          bpy.ops.object.camera_add(location=(target.x,lo.y-h*2.7,lo.z+h*0.78))
+          cam=bpy.context.object
+          cam.rotation_euler=(target-cam.location).to_track_quat("-Z","Y").to_euler()
+          cam.data.lens=52
+          scene.camera=cam
 
-          # Basic mouth movement to simulate speech
-          for frame, height in [(1, 0.5), (6, 1.8), (12, 0.6),
-                                (18, 2.0), (24, 0.5), (30, 1.7), (36, 0.5)]:
-              mouth.scale.z = 0.025 * height
-              mouth.keyframe_insert(data_path="scale", frame=frame)
+          bpy.ops.object.light_add(type="AREA",location=(target.x-h,lo.y-h*1.5,lo.z+h*1.7))
+          light=bpy.context.object
+          light.data.energy=850
+          light.data.size=h*1.2
+          scene.world.color=(0.12,0.12,0.12)
 
-          # Floor
-          bpy.ops.mesh.primitive_plane_add(size=200, location=(0, 0, 0))
-          bpy.context.object.data.materials.append(floor_mat)
-
-          # Camera
-          bpy.ops.object.camera_add(location=(3.8, -7, 2.7))
-          camera = bpy.context.object
-          direction = Vector((0, 0, 1.2)) - camera.location
-          camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
-          camera.data.type = "ORTHO"
-          camera.data.ortho_scale = 3.4
-          scene.camera = camera
-
-          # Lighting
-          bpy.ops.object.light_add(type="AREA", location=(1, -4, 5))
-          light = bpy.context.object
-          light.data.energy = 450
-          light.data.shape = "DISK"
-          light.data.size = 5
-
-          scene.world.color = (0.12, 0.12, 0.12)
-          scene.render.image_settings.color_mode = "RGB"
-
-          # Smooth animation interpolation
-          for obj in scene.objects:
-              if obj.animation_data and obj.animation_data.action:
-                  for curve in obj.animation_data.action.fcurves:
-                      for key in curve.keyframe_points:
-                          key.interpolation = "BEZIER"
-
-          os.makedirs("/tmp/blender-smoke", exist_ok=True)
-          scene.frame_set(1)
+          print("MPFB_HUMAN_VERTICES",len(human.data.vertices))
+          print("MPFB_RIG_BONES",len(rig.data.bones))
+          print("ANIMATED_ARM_BONE",arm_name)
+          print("AUDIO_DERIVED_MOUTH_CUES",len(cues))
+          if len(rig.data.bones)<20:
+              raise RuntimeError("Rig validation failed")
           bpy.ops.render.render(animation=True)
-          print("BLENDER_SMOKE_RENDER_COMPLETE")
+          print("HUMAN_ARABIC_LIPSYNC_RENDER_COMPLETE")
           PY
 
-          blender --background --python /tmp/blender_smoke.py
+          blender --background --python /tmp/human-test/create.py 2>&1 | tee /tmp/human-test/render.log
+          grep -q HUMAN_ARABIC_LIPSYNC_RENDER_COMPLETE /tmp/human-test/render.log
 
-      - name: Encode and validate MP4
+      - name: Encode and validate video
         run: |
-          ffmpeg -y \
-            -framerate 12 \
-            -i /tmp/blender-smoke/frame_%04d.png \
-            -c:v libx264 \
-            -pix_fmt yuv420p \
-            -movflags +faststart \
-            /tmp/blender-smoke/blender-smoke-test.mp4
-
-          ffprobe -v error \
-            -show_entries format=duration \
+          set -euo pipefail
+          ffmpeg -y -framerate 24 -i /tmp/human-test/frame_%04d.png \
+            -i /tmp/human-test/arabic.wav \
+            -c:v libx264 -preset veryfast -pix_fmt yuv420p \
+            -c:a aac -b:a 128k -shortest -movflags +faststart \
+            /tmp/human-test/human-arabic-lipsync.mp4
+          ffprobe -v error -show_entries format=duration \
             -show_entries stream=codec_name,width,height,r_frame_rate \
-            -of json \
-            /tmp/blender-smoke/blender-smoke-test.mp4
+            -of json /tmp/human-test/human-arabic-lipsync.mp4
+          test -s /tmp/human-test/human-arabic-lipsync.mp4
+          echo "HUMAN_ARABIC_LIPSYNC_TEST_SUCCESS"
 
-          test -s /tmp/blender-smoke/blender-smoke-test.mp4
-          echo "BLENDER_SMOKE_TEST_SUCCESS"
-
-      - name: Upload test video
+      - name: Upload test results
         uses: actions/upload-artifact@v4
         with:
-          name: blender-headless-smoke-test
-          path: /tmp/blender-smoke/blender-smoke-test.mp4
+          name: human-arabic-lipsync-test
+          path: |
+            /tmp/human-test/human-arabic-lipsync.mp4
+            /tmp/human-test/render.log
+            /tmp/human-test/cues.json
           retention-days: 3
