@@ -136,7 +136,7 @@ jobs:
 
           # Animate a real arm bone and torso bone on the MPFB skeleton.
           names=set(rig.data.bones.keys())
-          arm_name=next((n for n in ("upper_arm.L","upperarm.L","upper_arm.R","upperarm.R") if n in names),None)
+          arm_name=next((n for n in ("upperarm01.L","upperarm02.L","upperarm01.R","upperarm02.R","upper_arm.L","upperarm.L","upper_arm.R","upperarm.R") if n in names),None)
           if not arm_name:
               raise RuntimeError("MPFB upper-arm bone was not found")
           frames=[1,max(2,end_frame//3),max(3,2*end_frame//3),end_frame]
@@ -146,7 +146,7 @@ jobs:
               arm.rotation_euler[1]=a
               arm.keyframe_insert(data_path="rotation_euler",frame=f)
 
-          spine_name=next((n for n in ("spine","spine1","spine_01") if n in names),None)
+          spine_name=next((n for n in ("spine01","spine02","spine","spine1","spine_01") if n in names),None)
           if spine_name:
               spine=rig.pose.bones[spine_name]
               spine.rotation_mode="XYZ"
