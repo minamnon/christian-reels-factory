@@ -35,6 +35,441 @@ jobs:
           blender --command extension list | tee /tmp/human-test/extensions.txt
           grep -qi mpfb /tmp/human-test/extensions.txt
 
+      - name: Explore MPFB face API (read-only)
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          LOG=/tmp/human-test/explore.log
+          : > "$LOG"
+
+          ROOT="$(find "$HOME/.config/blender" -maxdepth 5 \
+            -type d -name mpfb -path '*/extensions/*' -print -quit)"
+
+          rc=0
+          if [ -z "$ROOT" ]; then
+            echo "[EXPLORE] MPFB_ROOT_NOT_FOUND" >> "$LOG"
+            rc=2
+          else
+            export MPFB_ROOT="$ROOT"
+            python3 - <<'PYTHON' > "$LOG" 2>&1
+          import os, re, ast, json, gzip, sys, traceback
+
+          ROOT = os.environ["MPFB_ROOT"]
+          MAX_JSON, MAX_SRC, MAX_TARGETS = 3000, 45, 80
+          CAP = 120000
+          used = 0
+          capped = False
+          status = {}
+
+          def E(*args):
+              global used, capped
+              if capped:
+                  return
+              lines = (" ".join(str(x) for x in args)).splitlines() or [""]
+              for line in lines:
+                  cost = len(line) + 11
+                  if used + cost > CAP:
+                      print("[EXPLORE] OUTPUT_CAP_REACHED", flush=True)
+                      capped = True
+                      return
+                  print("[EXPLORE]", line, flush=True)
+                  used += cost
+
+          def section(name, fn):
+              try:
+                  fn()
+                  status[name] = "OK"
+                  E("SECTION_OK", name)
+              except Exception as ex:
+                  status[name] = "ERROR"
+                  E("SECTION_ERROR", name, repr(ex))
+                  E(traceback.format_exc())
+
+          def read_text(rel):
+              with open(os.path.join(ROOT, rel), encoding="utf-8",
+                        errors="replace") as f:
+                  return f.read()
+
+          E("PYTHON", sys.version.split()[0], "ROOT", ROOT)
+
+          files, dircount = [], {}
+          for dp, dn, fs in os.walk(ROOT):
+              dn[:] = sorted(d for d in dn if d != "__pycache__")
+              for name in sorted(fs):
+                  if name.endswith(".pyc"):
+                      continue
+                  rel = os.path.relpath(os.path.join(dp, name), ROOT)
+                  files.append(rel)
+                  d = os.path.dirname(rel) or "."
+                  dircount[d] = dircount.get(d, 0) + 1
+
+          def s1_inventory():
+              E("INVENTORY", "files", len(files), "dirs", len(dircount))
+              rx = re.compile(r"face|express|viseme|phonem|pose|service", re.I)
+              for d in sorted(dircount):
+                  if rx.search(d):
+                      E("DIR", d, dircount[d])
+              services = sorted(
+                  f for f in files
+                  if f.startswith("services/") and f.endswith(".py")
+              )
+              E("SERVICES_PY", services)
+
+              groups = {}
+              for rel in files:
+                  p = rel.split("/")
+                  if p[:2] == ["data", "targets"] and len(p) > 3:
+                      groups[p[2]] = groups.get(p[2], 0) + 1
+              E("DATA_TARGETS_BY_GROUP", sorted(groups.items()))
+
+          def s2_viseme_json():
+              jl = sorted(
+                  f for f in files
+                  if f.endswith(".json")
+                  and re.search(r"viseme|faceunit|arkit|phoneme", f, re.I)
+              )
+              E("VISEME_JSON_FILES", jl)
+
+              if not jl:
+                  raise FileNotFoundError(
+                      "No viseme/face-unit JSON files were discovered"
+                  )
+
+              errors = []
+              parsed = 0
+
+              for rel in jl:
+                  raw = read_text(rel)
+                  E("JSON", rel, "bytes", len(raw))
+
+                  try:
+                      obj = json.loads(raw)
+                      parsed += 1
+
+                      if isinstance(obj, dict):
+                          top = list(obj.keys())[:40]
+                      elif isinstance(obj, list):
+                          top = "list_length=" + str(len(obj))
+                      else:
+                          top = type(obj).__name__
+
+                      E("JSON_TOP", rel, top)
+
+                  except Exception as ex:
+                      errors.append(rel)
+                      E("JSON_PARSE_ERROR", rel, repr(ex))
+
+                  body = raw[:MAX_JSON]
+                  if len(raw) > MAX_JSON:
+                      body += " ...[TRUNCATED]"
+                  E("JSON_BODY", rel, body)
+
+              if errors:
+                  raise RuntimeError(
+                      "Invalid JSON files: " + ", ".join(errors)
+                  )
+
+              if parsed == 0:
+                  raise RuntimeError("No valid viseme JSON was parsed")
+
+              E("VISEME_JSON_VALID_COUNT", parsed)
+          def s3_expressions_dir():
+              ex = sorted(
+                  f for f in files
+                  if f.startswith("data/expressions/")
+              )
+              E("DATA_EXPRESSIONS_FILES", len(ex), ex[:60])
+              readme = "data/expressions/README.md"
+              if readme in files:
+                  for line in read_text(readme).splitlines()[:60]:
+                      E("README", line)
+
+          def target_stats(rel):
+              with gzip.open(os.path.join(ROOT, rel), "rt",
+                             encoding="utf-8", errors="replace") as f:
+                  lines = [
+                      line for line in f.read().splitlines()
+                      if line.strip() and not line.lstrip().startswith("#")
+                  ]
+
+              indices = []
+              max_offset = 0.0
+              for line in lines:
+                  p = line.split()
+                  if len(p) != 4:
+                      continue
+                  try:
+                      idx = int(p[0])
+                      xyz = [float(x) for x in p[1:]]
+                  except ValueError:
+                      continue
+                  indices.append(idx)
+                  offset = sum(x*x for x in xyz) ** 0.5
+                  max_offset = max(max_offset, offset)
+
+              return {
+                  "data_lines": len(lines),
+                  "vertex_count": len(indices),
+                  "min_index": min(indices) if indices else None,
+                  "max_index": max(indices) if indices else None,
+                  "max_offset": round(max_offset, 6),
+                  "head": lines[:2],
+              }
+
+          def s4_targets():
+              targets = sorted(
+                  f for f in files
+                  if f.startswith("data/targets/expression/")
+                  and f.endswith(".target.gz")
+                  and re.search(r"mouth|jaw|lip|tongue", f, re.I)
+              )
+              E("MOUTH_EXPRESSION_TARGETS", len(targets))
+              for rel in targets[:MAX_TARGETS]:
+                  try:
+                      stats = target_stats(rel)
+                      E("TARGET", rel, stats)
+                      mx = stats["max_index"]
+                      if mx is not None and mx >= 19158:
+                          E("TARGET_INDEX_WARNING", rel,
+                            "max_index exceeds diagnostic mesh vertex count")
+                  except Exception as ex:
+                      E("TARGET_ERROR", rel, repr(ex))
+              if len(targets) > MAX_TARGETS:
+                  E("TARGETS_NOT_SHOWN", len(targets) - MAX_TARGETS)
+
+          WANT = {
+              "FaceService": [
+                  "list_available_expressions",
+                  "load_expression",
+                  "set_expression",
+                  "apply_expression_file",
+                  "load_targets",
+                  "interpolate_targets",
+                  "aggregate_expression_stack",
+                  "rebuild_expression_stack",
+                  "read_current_expression",
+                  "is_faceunits01_installed",
+                  "clear_expression",
+                  "clear_applied_expressions",
+              ],
+              "TargetService": [
+                  "load_target",
+                  "create_shape_key",
+                  "get_target_value",
+                  "get_target_stack",
+                  "bulk_load_targets",
+                  "expression_name_to_shapekey_name",
+                  "target_full_path",
+                  "target_string_to_shape_key",
+              ],
+          }
+
+          def s5_services_ast():
+              service_specs = {
+                  "faceservice.py": "FaceService",
+                  "targetservice.py": "TargetService",
+              }
+
+              discovered = {}
+
+              for fname, expected_class in service_specs.items():
+                  matches = [
+                      f for f in files
+                      if os.path.basename(f).lower() == fname
+                  ]
+
+                  if not matches:
+                      raise FileNotFoundError(fname + " not found")
+
+                  found_class = False
+
+                  for rel in matches:
+                      source = read_text(rel)
+                      lines = source.splitlines()
+                      tree = ast.parse(source)
+                      E("SERVICE_FILE", rel)
+
+                      classes = [
+                          n for n in tree.body
+                          if isinstance(n, ast.ClassDef)
+                      ]
+
+                      for cls in classes:
+                          if cls.name != expected_class:
+                              continue
+
+                          found_class = True
+                          methods = [
+                              n for n in cls.body
+                              if isinstance(n, (
+                                  ast.FunctionDef,
+                                  ast.AsyncFunctionDef
+                              ))
+                          ]
+
+                          names = {fn.name for fn in methods}
+                          discovered[expected_class] = names
+
+                          E("CLASS_FOUND", cls.name,
+                            "L%d-%d" % (cls.lineno, cls.end_lineno))
+                          E("METHOD_COUNT", cls.name, len(methods))
+
+                          for fn in methods:
+                              doc = (
+                                  ast.get_docstring(fn) or ""
+                              ).strip().splitlines()
+
+                              E("DEF", cls.name + "." + fn.name,
+                                ast.unparse(fn.args),
+                                "L%d-%d" % (fn.lineno, fn.end_lineno),
+                                "DOC", " ".join(doc[:2])[:160])
+
+                          # Print known methods and any newly named
+                          # methods that appear relevant to facial APIs.
+                          relevant = re.compile(
+                              r"face|expression|viseme|phonem|target|"
+                              r"shape|interpol|load|apply|aggregate|"
+                              r"rebuild|clear|current",
+                              re.I
+                          )
+
+                          for fn in methods:
+                              if (
+                                  fn.name not in WANT.get(cls.name, [])
+                                  and not relevant.search(fn.name)
+                              ):
+                                  continue
+
+                              start_line = min(
+                                  [fn.lineno] +
+                                  [d.lineno for d in fn.decorator_list]
+                              )
+                              body = lines[start_line - 1:fn.end_lineno]
+
+                              E("SOURCE", cls.name + "." + fn.name,
+                                "range",
+                                "%d-%d" % (start_line, fn.end_lineno),
+                                "actual_lines", len(body))
+
+                              for line in body[:MAX_SRC]:
+                                  E("  |", line.rstrip())
+
+                              if len(body) > MAX_SRC:
+                                  E("SOURCE_TRUNCATED",
+                                    cls.name + "." + fn.name,
+                                    "omitted_lines",
+                                    len(body) - MAX_SRC)
+
+                  if not found_class:
+                      raise RuntimeError(
+                          "Expected class not found: " + expected_class
+                      )
+
+              # Capability groups are intentionally flexible:
+              # aliases are accepted, and unknown methods remain visible
+              # in the report rather than causing a version-specific failure.
+              capability_groups = {
+                  "FaceService": {
+                      "expression_loading": {
+                          "load_expression",
+                          "apply_expression_file",
+                      },
+                      "expression_application": {
+                          "set_expression",
+                          "apply_expression_file",
+                          "rebuild_expression_stack",
+                      },
+                  },
+                  "TargetService": {
+                      "target_loading": {
+                          "load_target",
+                          "load_targets",
+                          "bulk_load_targets",
+                      },
+                      "shape_key_access": {
+                          "create_shape_key",
+                          "target_string_to_shape_key",
+                          "target_string_to_shape_key_info",
+                      },
+                  },
+              }
+
+              for cls_name, groups in capability_groups.items():
+                  names = discovered.get(cls_name, set())
+
+                  for capability, aliases in groups.items():
+                      found = sorted(names.intersection(aliases))
+
+                      if found:
+                          E("CAPABILITY_FOUND", cls_name,
+                            capability, found)
+                      else:
+                          E("CAPABILITY_NOT_CONFIRMED", cls_name,
+                            capability,
+                            "available_methods_were_reported_above")
+
+              E("SERVICE_API_DISCOVERY_COMPLETE")
+          def s6_viseme_refs():
+              rx = re.compile(r"viseme|faceunit|arkit|phoneme", re.I)
+              per_file = {}
+              hits = []
+
+              for rel in files:
+                  if not rel.endswith(".py"):
+                      continue
+                  for n, line in enumerate(read_text(rel).splitlines(), 1):
+                      if rx.search(line):
+                          per_file[rel] = per_file.get(rel, 0) + 1
+                          hits.append((rel, n, line.strip()[:180]))
+
+              E("VISEME_REFS_BY_FILE",
+                sorted(per_file.items(), key=lambda x: -x[1])[:50])
+              for rel, n, line in hits[:100]:
+                  E("REF", "%s:%d" % (rel, n), line)
+
+          section("s1_inventory", s1_inventory)
+          section("s2_viseme_json", s2_viseme_json)
+          section("s3_expressions_dir", s3_expressions_dir)
+          section("s4_targets", s4_targets)
+          section("s5_services_ast", s5_services_ast)
+          section("s6_viseme_refs", s6_viseme_refs)
+
+          failed = [name for name, result in status.items()
+                    if result != "OK"]
+          E("SECTION_STATUS", status)
+
+          critical = [
+              name for name in ("s2_viseme_json", "s5_services_ast")
+              if status.get(name) != "OK"
+          ]
+
+          if critical:
+              print("[EXPLORE] EXPLORE_INCOMPLETE",
+                    "critical_failures=", critical, flush=True)
+              sys.exit(2)
+
+          if failed:
+              print("[EXPLORE] EXPLORE_COMPLETE_WITH_WARNINGS",
+                    "failed_sections=", failed, flush=True)
+          else:
+              print("[EXPLORE] EXPLORE_COMPLETE", flush=True)
+          PYTHON
+            rc=$?
+          fi
+
+          {
+            echo '```text'
+            cat "$LOG"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$rc" -ne 0 ]; then
+            echo "MPFB exploration failed with exit code $rc"
+            exit "$rc"
+          fi
+
+          grep -Eq 'EXPLORE_COMPLETE($|_WITH_WARNINGS)' "$LOG"
+
       - name: Generate Arabic speech and Rhubarb cues
         run: |
           set -euo pipefail
