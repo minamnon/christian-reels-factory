@@ -93,6 +93,237 @@ jobs:
           if rig is None or rig.type!="ARMATURE":
               raise RuntimeError("MPFB default rig creation failed")
 
+
+          # ---- TEMP DIAGNOSTIC v3: read-only, restores state, exits before render ----
+          import os, re, time
+          from array import array
+          try:
+              import numpy as np
+          except Exception:
+              np = None
+
+          EPS_W, EPS_D, MIN_VERTS = 1e-4, 5e-4, 20
+          ROT, LOC = 0.35, 0.01
+          TIME_BUDGET, MAX_BONES, MAX_KEYS = 240, 80, 120
+          T0 = time.time()
+          FACE_RX = re.compile(r"jaw|chin|lip|mouth|oris|brow|lid|blink|tongue|cheek|nose|eye|levator|zygo|risorius|temporalis|orbicularis|special", re.I)
+
+          def P(*a): print("[DIAG]", *a, flush=True)
+          def late(): return time.time() - T0 > TIME_BUDGET
+          def upd(): bpy.context.view_layer.update()
+          def fmt(c): return None if c is None else tuple(round(v, 3) for v in c)
+
+          def coords(obj):
+              ev = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+              me = ev.to_mesh()
+              try:
+                  n = len(me.vertices)
+                  buf = np.empty(n * 3, dtype=np.float32) if np else array("f", [0.0]) * (n * 3)
+                  me.vertices.foreach_get("co", buf)
+              finally:
+                  ev.to_mesh_clear()
+              return buf
+
+          def measure(base, cur):
+              if len(base) != len(cur): return -1, 0.0, None
+              if np:
+                  d = np.linalg.norm((cur - base).reshape(-1, 3), axis=1)
+                  sel = d > EPS_D; n = int(sel.sum())
+                  c = cur.reshape(-1, 3)[sel].mean(axis=0).tolist() if n else None
+                  return n, (float(d.max()) if len(d) else 0.0), c
+              n = 0; mx = 0.0; s = [0.0, 0.0, 0.0]
+              for i in range(0, len(base), 3):
+                  dx = cur[i] - base[i]; dy = cur[i+1] - base[i+1]; dz = cur[i+2] - base[i+2]
+                  d = (dx*dx + dy*dy + dz*dz) ** 0.5
+                  if d > mx: mx = d
+                  if d > EPS_D:
+                      n += 1; s[0] += cur[i]; s[1] += cur[i+1]; s[2] += cur[i+2]
+              return n, mx, ([v / n for v in s] if n else None)
+
+          def pose_state(pb):
+              return (pb.rotation_mode, tuple(pb.location), tuple(pb.rotation_quaternion),
+                      tuple(pb.rotation_euler), tuple(pb.scale))
+
+          def set_pose(pb, s):
+              pb.rotation_mode = s[0]; pb.location = s[1]; pb.rotation_quaternion = s[2]
+              pb.rotation_euler = s[3]; pb.scale = s[4]
+
+          def test_bone(pb, mesh, base):
+              orig = pose_state(pb); best = (0, 0.0, None, "")
+              try:
+                  for kind in ("rot", "loc"):
+                      for ax in range(3):
+                          if late(): return best
+                          set_pose(pb, orig)
+                          if kind == "rot":
+                              pb.rotation_mode = "XYZ"
+                              e = list(pb.rotation_euler); e[ax] += ROT; pb.rotation_euler = e
+                          else:
+                              l = list(pb.location); l[ax] += LOC; pb.location = l
+                          upd()
+                          r = measure(base, coords(mesh))
+                          if r[0] > best[0]: best = (r[0], r[1], r[2], kind + "XYZ"[ax])
+                      if kind == "rot" and best[0] >= MIN_VERTS: break
+              finally:
+                  set_pose(pb, orig); upd()
+              return best
+
+          def _diag():
+              upd()
+              arms = [o for o in bpy.data.objects if o.type == "ARMATURE"]
+              meshes = [o for o in bpy.data.objects if o.type == "MESH"]
+              P("ENV blender", bpy.app.version_string, "numpy", np.__version__ if np else "MISSING->pure_python")
+              pose_orig = {(a.name, pb.name): pose_state(pb) for a in arms for pb in a.pose.bones}
+              mod_orig = {(m.name, x.name): x.show_viewport for m in meshes for x in m.modifiers}
+              key_orig = {}
+              for m in meshes:
+                  if m.data.shape_keys:
+                      for kb in m.data.shape_keys.key_blocks:
+                          key_orig[(m.name, kb.name)] = (kb.value, kb.mute)
+              try:
+                  P("ARMATURES", [(a.name, len(a.pose.bones)) for a in arms])
+                  allb = {}
+                  for a in arms:
+                      for pb in a.pose.bones:
+                          allb[pb.name] = (a, pb)
+                          P("BONE", a.name, pb.name, "parent=", pb.parent.name if pb.parent else None,
+                            "deform=", pb.bone.use_deform, "constraints=", len(pb.constraints))
+                      P("DRIVERS_ON_ARMATURE", a.name, len(a.animation_data.drivers) if a.animation_data else 0)
+                  wcount = {}
+                  for m in meshes:
+                      mods = [x for x in m.modifiers if x.type == "ARMATURE"]
+                      sk = m.data.shape_keys
+                      P("MESH", m.name, "verts=", len(m.data.vertices), "parent=", m.parent.name if m.parent else None,
+                        "parent_type=", m.parent_type, "parent_bone=", m.parent_bone or None,
+                        "armature_mods=", [x.object.name if x.object else None for x in mods],
+                        "all_mods=", [x.type for x in m.modifiers])
+                      P("SHAPEKEYS", m.name, len(sk.key_blocks) if sk else 0,
+                        [k.name for k in sk.key_blocks] if sk else [],
+                        "drivers=", len(sk.animation_data.drivers) if sk and sk.animation_data else 0)
+                      if not mods and m.parent_type != "BONE":
+                          P("UNBOUND_MESH", m.name)
+                      idx = {g.index: g.name for g in m.vertex_groups if g.name in allb}
+                      cnt = {}
+                      for v in m.data.vertices:
+                          for g in v.groups:
+                              n = idx.get(g.group)
+                              if n and g.weight > EPS_W:
+                                  cnt[n] = cnt.get(n, 0) + 1
+                      wcount[m.name] = cnt
+
+                  named = [n for n in allb if FACE_RX.search(n)]
+                  head_desc = []
+                  for a in arms:
+                      for pb in a.pose.bones:
+                          if pb.name.lower() == "head":
+                              head_desc += [c.name for c in pb.children_recursive]
+                  head_only = [n for n in dict.fromkeys(head_desc) if n not in named]
+                  group = {}
+                  for n in named: group[n] = "A_name_matched"
+                  for n in head_only: group[n] = "B_head_descendant"
+                  P("GROUP_A_NAME_MATCHED", len(named), named)
+                  P("GROUP_B_HEAD_DESCENDANTS_NOT_NAME_MATCHED", len(head_only), head_only)
+
+                  weighted = lambda n: any(wcount[k].get(n, 0) for k in wcount)
+                  okb = lambda n: allb[n][1].bone.use_deform and weighted(n)
+                  cand = [n for n in named + head_only if okb(n)][:MAX_BONES]
+                  P("CANDIDATES", len(cand), "EXCLUDED_NONDEFORM_OR_UNWEIGHTED",
+                    [n for n in group if n not in cand])
+
+                  moved = {}
+                  for m in meshes:
+                      mods = [x for x in m.modifiers if x.type == "ARMATURE" and x.object]
+                      if not mods: continue
+                      for x in m.modifiers:
+                          x.show_viewport = (x.type == "ARMATURE")
+                      upd(); base = coords(m)
+                      P("MESH_Z_RANGE", m.name, round(min(base[2::3]), 3), round(max(base[2::3]), 3))
+                      for n in cand:
+                          if late(): break
+                          arm, pb = allb[n]
+                          if wcount[m.name].get(n, 0) == 0 or not any(x.object == arm for x in mods):
+                              continue
+                          r = test_bone(pb, m, base)
+                          P("BONE_MOVES_SKIN", n, group[n], m.name, "weighted_verts=", wcount[m.name][n],
+                            "verts_moved=", r[0], "max_disp=", round(r[1], 5), "via=", r[3], "centroid=", fmt(r[2]))
+                          if r[0] >= MIN_VERTS:
+                              moved.setdefault(n, []).append(m.name)
+                      for x in m.modifiers:
+                          x.show_viewport = mod_orig[(m.name, x.name)]
+                      upd()
+
+                  kmoved = []
+                  for m in meshes:
+                      sk = m.data.shape_keys
+                      if not sk or len(sk.key_blocks) < 2: continue
+                      for x in m.modifiers:
+                          x.show_viewport = False
+                      upd(); base = coords(m)
+                      for kb in list(sk.key_blocks)[1:MAX_KEYS + 1]:
+                          if late(): break
+                          v0, mu0 = kb.value, kb.mute
+                          try:
+                              kb.mute = False
+                              kb.value = 1.0 if v0 < 0.5 else 0.0
+                              upd(); r = measure(base, coords(m))
+                          finally:
+                              kb.value, kb.mute = v0, mu0
+                              upd()
+                          P("SHAPEKEY_MOVES_SKIN", m.name, kb.name, "verts_moved=", r[0],
+                            "max_disp=", round(r[1], 5), "centroid=", fmt(r[2]))
+                          if r[0] >= MIN_VERTS:
+                              kmoved.append(m.name + ":" + kb.name)
+                      for x in m.modifiers:
+                          x.show_viewport = mod_orig[(m.name, x.name)]
+                      upd()
+
+                  for g in ("A_name_matched", "B_head_descendant"):
+                      lst = sorted(n for n in moved if group[n] == g)
+                      P("VERDICT_MOVING_SKIN_" + g, len(lst), lst)
+                  P("VERDICT_SHAPEKEYS_MOVING_SKIN", len(kmoved), kmoved[:60])
+                  P("TIME_BUDGET_EXCEEDED", late())
+
+                  rx = r"pose|face|expression|viseme|shape|target|rig"
+                  for name, mod in list(sys.modules.items()):
+                      if mod and "mpfb" in name and "service" in name:
+                          for a in dir(mod):
+                              o = getattr(mod, a, None)
+                              if isinstance(o, type) and getattr(o, "__module__", "") == name:
+                                  ms = [x for x in dir(o) if re.search(rx, x, re.I) and not x.startswith("__")]
+                                  if ms: P("MPFB_API", name + "." + a, ms)
+
+                  root = next((os.path.dirname(os.path.dirname(mm.__file__)) for nn, mm in sys.modules.items()
+                               if mm and nn.endswith("mpfb.services") and getattr(mm, "__file__", None)), None)
+                  P("MPFB_ROOT", root); c = 0
+                  for dp, _, fs in os.walk(root or "/nonexistent"):
+                      for f in fs:
+                          full = os.path.join(dp, f)
+                          if re.search(r"viseme|phoneme|expression|facepose|arkit|rigs", full, re.I) and c < 150:
+                              P("MPFB_FILE", os.path.relpath(full, root)); c += 1
+                  P("HUMAN_DIAG_COMPLETE", "seconds=", round(time.time() - T0, 1))
+              finally:
+                  for (an, bn), state in pose_orig.items():
+                      set_pose(bpy.data.objects[an].pose.bones[bn], state)
+                  for (mn, xn), value in mod_orig.items():
+                      bpy.data.objects[mn].modifiers[xn].show_viewport = value
+                  for (mn, kn), (value, mute) in key_orig.items():
+                      kb = bpy.data.objects[mn].data.shape_keys.key_blocks[kn]
+                      kb.value, kb.mute = value, mute
+                  upd()
+
+          rc = 0
+          try:
+              _diag()
+          except Exception:
+              import traceback
+              traceback.print_exc()
+              P("DIAG_ERROR")
+              rc = 1
+          finally:
+              sys.stdout.flush()
+              sys.stderr.flush()
+          sys.exit(rc)
+
           # Simple skin material; no optional asset packs or production files.
           mat=bpy.data.materials.new("Test Human Skin")
           mat.diffuse_color=(0.48,0.25,0.16,1)
@@ -193,9 +424,11 @@ jobs:
           PY
 
           blender --background --python /tmp/human-test/create.py 2>&1 | tee /tmp/human-test/render.log
-          grep -q HUMAN_ARABIC_LIPSYNC_RENDER_COMPLETE /tmp/human-test/render.log
+          { echo '```text'; grep -F '[DIAG]' /tmp/human-test/render.log || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          grep -q HUMAN_DIAG_COMPLETE /tmp/human-test/render.log
 
       - name: Encode and validate video
+        if: ${{ false }}
         run: |
           set -euo pipefail
           ffmpeg -y -framerate 24 -i /tmp/human-test/frame_%04d.png \
@@ -210,6 +443,7 @@ jobs:
           echo "HUMAN_ARABIC_LIPSYNC_TEST_SUCCESS"
 
       - name: Upload test results
+        if: ${{ false }}
         uses: actions/upload-artifact@v4
         with:
           name: human-arabic-lipsync-test
