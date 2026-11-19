@@ -779,11 +779,33 @@ def main():
     print("Image provider: Cloudflare FLUX.1 Schnell")
     print("=" * 55)
 
-    clean_text = clean_script(script)
-    scenes = split_scenes(clean_text)
+    dialogue = voice.parse_dialogue(script)
+    scene_groups = None
+    if dialogue:
+        clean_text = " ".join(text for _, text in dialogue)
+        count = min(6, max(3, math.ceil(len(dialogue) / 2)))
+        count = min(count, len(dialogue))
+        size = math.ceil(len(dialogue) / count)
+        scene_groups = [
+            list(range(i, min(i + size, len(dialogue))))
+            for i in range(0, len(dialogue), size)
+        ]
+        scenes = [
+            " ".join(dialogue[i][1] for i in group)
+            for group in scene_groups
+        ]
+        print("Dialogue mode: speakers =",
+              sorted({s for s, _ in dialogue if s != voice.NARRATOR}))
+    else:
+        clean_text = clean_script(script)
+        scenes = split_scenes(clean_text)
     plan = load_scene_plan()
     if plan:
-        scenes = [str(s['narration']).strip() for s in plan['scenes']]
+        scenes = [
+            voice.strip_speaker_labels(str(s['narration']).strip())
+            for s in plan['scenes']
+        ]
+        scene_groups = None
         print('Scene plan loaded. Profile:', plan.get('profile', 'general'))
     if not scenes:
         raise RuntimeError("No scenes were generated.")
@@ -793,8 +815,15 @@ def main():
     used_ids = set()
 
     voice_path = None
+    line_seconds = None
     try:
-        voice_path = voice.generate_voice(clean_text, WORK)
+        if dialogue:
+            result = voice.generate_dialogue(
+                dialogue, WORK, script=script, plan=plan)
+            if result:
+                voice_path, line_seconds = result
+        if not voice_path:
+            voice_path = voice.generate_voice(clean_text, WORK)
         if voice_path:
             voice_seconds = voice.audio_duration(voice_path)
             total_seconds = voice_seconds + 1.0
@@ -814,6 +843,11 @@ def main():
     scene_durations = [
         total_seconds * weight / sum(weights) for weight in weights
     ]
+    if voice_path and line_seconds and scene_groups and not plan:
+        scene_durations = [
+            sum(line_seconds[i] for i in group) for group in scene_groups
+        ]
+        scene_durations[-1] += max(0.0, total_seconds - sum(scene_durations))
     scene_files = []
 
     for pattern in ("scene_*.mp4", "scene_*.jpg", "candidate_*", "source_*"):
