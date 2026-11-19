@@ -455,3 +455,49 @@ def strip_speaker_labels(text):
         lines.append(_clean_spoken(match.group("text")) if match
                      else _clean_spoken(line))
     return " ".join(l for l in lines if l)
+
+
+def _norm(text):
+    text = re.sub(r"[\u064B-\u065F\u0640]", "", str(text))
+    return re.sub(r"[^\w]|_", "", text)
+
+
+def assign_lines_to_scenes(utterances, scene_texts):
+    """Group consecutive dialogue lines into the given scenes.
+
+    Returns a list (one per scene) of utterance indices, contiguous and in
+    order, or None when it cannot be done safely (caller keeps old timing).
+    """
+    n, m = len(utterances), len(scene_texts)
+    if not n or not m or m > n:
+        return None
+    scenes = [_norm(t) for t in scene_texts]
+    lines = [_norm(t) for _, t in utterances]
+
+    groups, current, ok = [[] for _ in range(m)], 0, True
+    for i, line in enumerate(lines):
+        found = next((k for k in range(current, m)
+                      if line and line in scenes[k]), None)
+        if found is None:
+            ok = False
+            break
+        current = found
+        groups[found].append(i)
+
+    if not ok:  # fall back to proportional split by text length
+        total_scene = sum(len(s) for s in scenes) or 1
+        total_line = sum(len(s) for s in lines) or 1
+        edges, acc = [], 0
+        for s in scenes:
+            acc += len(s)
+            edges.append(acc / total_scene)
+        groups, acc = [[] for _ in range(m)], 0
+        for i, line in enumerate(lines):
+            mid = (acc + len(line) / 2) / total_line
+            acc += len(line)
+            k = next((k for k, e in enumerate(edges) if mid <= e), m - 1)
+            groups[k].append(i)
+
+    if any(not g for g in groups):
+        return None
+    return groups

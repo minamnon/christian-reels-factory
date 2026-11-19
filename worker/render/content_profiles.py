@@ -1,7 +1,7 @@
 PROFILES = {
     "christian_egypt": {
         "style": "Photorealistic cinematic documentary photograph, vertical 9:16 composition, warm natural light, shallow depth of field, authentic modern Egypt, professional color grading.",
-        "rules": "Egyptian Coptic Christian setting. Every woman and girl has visible, uncovered hair and wears a simple modern everyday outfit. Men wear modern everyday clothes. Religious symbols are limited to a cross, candles, an open Bible, church architecture and rays of light; God and Jesus are never shown as a person. Pages, signs and screens are blank, with no letters or writing anywhere.",
+        "rules": "Egyptian Coptic Christian setting. Every woman and girl has visible, uncovered hair and wears a simple modern everyday outfit. Men wear modern everyday clothes. Religious symbols are limited to a cross, candles, church architecture and rays of light, and a Bible appears only when the scene text explicitly mentions it; God and Jesus are never shown as a person. Pages, signs and screens are blank, with no letters or writing anywhere.",
     },
     "kids": {
         "style": "Bright friendly 3D animated children's film style, soft rounded characters, vivid colors, gentle lighting, vertical 9:16 composition.",

@@ -735,6 +735,35 @@ def make_fallback_background():
 # VIDEO RENDERING
 # =========================================================
 
+def make_subtitle_png(text):
+    """Transparent 1080x1920 overlay: soft shade + outlined Arabic text."""
+    overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    centre, half = 1420, 330
+    for y in range(centre - half, centre + half):
+        fade = 1 - abs(y - centre) / half
+        draw.line((0, y, WIDTH, y), fill=(0, 0, 0, int(150 * fade ** 0.7)))
+
+    font = get_font(60)
+    lines = wrap_text(draw, text, font, 880)[:4]
+    line_height = 96
+    start_y = centre - (len(lines) * line_height) // 2
+
+    for index, line in enumerate(lines):
+        box = draw.textbbox(
+            (0, 0), line, font=font, direction="rtl", language="ar"
+        )
+        x = (WIDTH - (box[2] - box[0])) // 2
+        y = start_y + index * line_height
+        draw.text(
+            (x, y), line, font=font, fill=(255, 250, 235, 255),
+            direction="rtl", language="ar",
+            stroke_width=5, stroke_fill=(0, 0, 0, 255),
+        )
+    return overlay
+
+
 def render_scene(image_path, duration, output_path):
     frames = max(1, int(math.ceil(duration * FPS)))
     video_filter = (
@@ -752,7 +781,7 @@ def render_scene(image_path, duration, output_path):
         "-vf", video_filter,
         "-an",
         "-c:v", "libx264",
-        "-preset", "ultrafast",
+        "-preset", "veryfast", "-crf", "18",
         "-pix_fmt", "yuv420p",
         str(output_path)
     ])
@@ -805,7 +834,10 @@ def main():
             voice.strip_speaker_labels(str(s['narration']).strip())
             for s in plan['scenes']
         ]
-        scene_groups = None
+        scene_groups = (
+            voice.assign_lines_to_scenes(dialogue, scenes)
+            if dialogue else None
+        )
         print('Scene plan loaded. Profile:', plan.get('profile', 'general'))
     if not scenes:
         raise RuntimeError("No scenes were generated.")
@@ -843,11 +875,21 @@ def main():
     scene_durations = [
         total_seconds * weight / sum(weights) for weight in weights
     ]
-    if voice_path and line_seconds and scene_groups and not plan:
+    if voice_path and line_seconds and scene_groups:
         scene_durations = [
             sum(line_seconds[i] for i in group) for group in scene_groups
         ]
         scene_durations[-1] += max(0.0, total_seconds - sum(scene_durations))
+    sub_events = []
+    if voice_path and line_seconds and scene_groups and dialogue:
+        cursor = 0.0
+        for number, (_, line_text) in enumerate(dialogue):
+            end = cursor + line_seconds[number]
+            png = WORK / f"sub_{number:02d}.png"
+            make_subtitle_png(line_text).save(png)
+            sub_events.append((png, cursor, end))
+            cursor = end
+        print(f"Timed subtitles: {len(sub_events)} lines.")
     scene_files = []
 
     for pattern in ("scene_*.mp4", "scene_*.jpg", "candidate_*", "source_*"):
@@ -866,7 +908,8 @@ def main():
             scene_plan=plan, scene_index=index - 1
         )
 
-        image = add_scene_text(image, scene_text)
+        if not sub_events:
+            image = add_scene_text(image, scene_text)
         image = add_image_credit(image, image_info)
 
         image_path = WORK / f"scene_{index:02d}.jpg"
@@ -897,20 +940,39 @@ def main():
         ]
         if with_voice:
             command += ["-i", str(voice_path)]
+        first_sub = 2 if with_voice else 1
+        for png, _, _ in sub_events:
+            command += ["-i", str(png)]
+
+        video_map = "0:v:0"
+        if sub_events:
+            chain, last = [], "0:v"
+            for number, (_, begin, finish) in enumerate(sub_events):
+                label = f"v{number}"
+                chain.append(
+                    f"[{last}][{first_sub + number}:v]"
+                    f"overlay=0:0:enable='between(t,{begin:.3f},"
+                    f"{finish:.3f})'[{label}]"
+                )
+                last = label
+            chain.append(f"[{last}]format=yuv420p[vout]")
+            command += ["-filter_complex", ";".join(chain)]
+            video_map = "[vout]"
+
         command += [
             "-c:v", "libx264",
-            "-preset", "ultrafast",
+            "-preset", "veryfast", "-crf", "23",
             "-pix_fmt", "yuv420p",
             "-r", str(FPS),
         ]
         if with_voice:
             command += [
-                "-map", "0:v:0", "-map", "1:a:0",
+                "-map", video_map, "-map", "1:a:0",
                 "-c:a", "aac", "-b:a", "192k",
                 "-af", "apad", "-shortest",
             ]
         else:
-            command += ["-an"]
+            command += ["-map", video_map, "-an"]
         command += ["-movflags", "+faststart", str(output_path)]
         return command
 
