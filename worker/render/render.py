@@ -764,21 +764,51 @@ def make_subtitle_png(text):
     return overlay
 
 
-def render_scene(image_path, duration, output_path):
-    frames = max(1, int(math.ceil(duration * FPS)))
-    video_filter = (
-        "zoompan=z='min(zoom+0.00035,1.08)':"
-        f"d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS},"
-        "format=yuv420p"
+MOTIONS = ("in", "pan_right", "out", "pan_left", "in_up")
+FADE = float(os.environ.get("REEL_FADE", "0.2"))
+
+
+def motion_filter(index, frames):
+    """Ken Burns motion that changes from scene to scene."""
+    mode = MOTIONS[(index - 1) % len(MOTIONS)]
+    p = f"on/{frames}"
+    if mode == "in":
+        z = f"1+0.10*{p}"
+        x, y = f"iw/2-iw/({z})/2", f"ih/2-ih/({z})/2"
+    elif mode == "out":
+        z = f"1.10-0.10*{p}"
+        x, y = f"iw/2-iw/({z})/2", f"ih/2-ih/({z})/2"
+    elif mode == "pan_right":
+        z = "1.08"
+        x, y = f"(iw-iw/{z})*{p}", f"(ih-ih/{z})/2"
+    elif mode == "pan_left":
+        z = "1.08"
+        x, y = f"(iw-iw/{z})*(1-{p})", f"(ih-ih/{z})/2"
+    else:  # in_up: zoom in toward the upper third (faces)
+        z = f"1+0.10*{p}"
+        x, y = f"iw/2-iw/({z})/2", f"(ih-ih/({z}))*0.35"
+    return (
+        f"scale={WIDTH * 2}:{HEIGHT * 2}:flags=lanczos,"
+        f"zoompan=z='{z}':x='{x}':y='{y}':"
+        f"d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS}"
     )
+
+
+def render_scene(image_path, duration, output_path, index=1):
+    frames = max(1, int(math.ceil(duration * FPS)))
+    video_filter = motion_filter(index, frames)
+    if FADE > 0 and duration > FADE * 4:
+        video_filter += (
+            f",fade=t=in:st=0:d={FADE}"
+            f",fade=t=out:st={duration - FADE:.3f}:d={FADE}"
+        )
+    video_filter += ",format=yuv420p"
 
     run([
         "ffmpeg", "-y",
-        "-loop", "1",
-        "-framerate", str(FPS),
         "-i", str(image_path),
-        "-t", str(duration),
         "-vf", video_filter,
+        "-t", f"{duration:.3f}",
         "-an",
         "-c:v", "libx264",
         "-preset", "veryfast", "-crf", "18",
@@ -916,7 +946,7 @@ def main():
         video_path = WORK / f"scene_{index:02d}.mp4"
 
         image.save(image_path, "JPEG", quality=94)
-        render_scene(image_path, scene_durations[index - 1], video_path)
+        render_scene(image_path, scene_durations[index - 1], video_path, index)
         scene_files.append(video_path)
 
     concat_file = WORK / "concat_list.txt"
