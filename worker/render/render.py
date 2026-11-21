@@ -159,6 +159,10 @@ def run(command):
         raise
 
 
+TEXT_DIR = "rtl"
+TEXT_LANG = "ar"
+
+
 def check_arabic_support():
     if not features.check_feature("raqm"):
         raise RuntimeError(
@@ -168,6 +172,9 @@ def check_arabic_support():
 
 def get_font(size):
     candidates = [
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ] if TEXT_LANG == "en" else [
         "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
         "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -623,7 +630,7 @@ def wrap_text(draw, text, font, max_width):
     for word in words:
         test = f"{current} {word}".strip()
         width = draw.textlength(
-            test, font=font, direction="rtl", language="ar"
+            test, font=font, direction=TEXT_DIR, language=TEXT_LANG
         )
         if width <= max_width:
             current = test
@@ -660,7 +667,7 @@ def add_scene_text(image, text):
 
     for line_index, line in enumerate(lines):
         box = draw.textbbox(
-            (0, 0), line, font=font, direction="rtl", language="ar"
+            (0, 0), line, font=font, direction=TEXT_DIR, language=TEXT_LANG
         )
         text_width = box[2] - box[0]
         x = (WIDTH - text_width) // 2
@@ -668,11 +675,11 @@ def add_scene_text(image, text):
 
         draw.text(
             (x + 3, y + 5), line, font=font,
-            fill=(0, 0, 0, 220), direction="rtl", language="ar"
+            fill=(0, 0, 0, 220), direction=TEXT_DIR, language=TEXT_LANG
         )
         draw.text(
             (x, y), line, font=font,
-            fill=(255, 250, 235, 255), direction="rtl", language="ar"
+            fill=(255, 250, 235, 255), direction=TEXT_DIR, language=TEXT_LANG
         )
 
     return image.convert("RGB")
@@ -752,13 +759,13 @@ def make_subtitle_png(text):
 
     for index, line in enumerate(lines):
         box = draw.textbbox(
-            (0, 0), line, font=font, direction="rtl", language="ar"
+            (0, 0), line, font=font, direction=TEXT_DIR, language=TEXT_LANG
         )
         x = (WIDTH - (box[2] - box[0])) // 2
         y = start_y + index * line_height
         draw.text(
             (x, y), line, font=font, fill=(255, 250, 235, 255),
-            direction="rtl", language="ar",
+            direction=TEXT_DIR, language=TEXT_LANG,
             stroke_width=5, stroke_fill=(0, 0, 0, 255),
         )
     return overlay
@@ -817,6 +824,22 @@ def render_scene(image_path, duration, output_path, index=1):
     ])
 
 
+def apply_language(plan):
+    """Opt-in: only a scene_plan with "language": "en" changes anything."""
+    global TEXT_DIR, TEXT_LANG
+    lang = str((plan or {}).get("language", "")).strip().lower()
+    if not lang.startswith("en"):
+        return
+    TEXT_DIR, TEXT_LANG = "ltr", "en"
+    voice.GEMINI_LANGUAGE = "en-US"
+    voice.GEMINI_STYLE = ("gripping, intense documentary narration in "
+                          "American English, measured pace, "
+                          "dramatic pauses")
+    voice.CHARACTER_STYLE = ("natural, emotional, conversational "
+                             "American English dialogue")
+    print("Language: English (LTR subtitles, en-US voices)")
+
+
 def main():
     topic = os.environ.get(
         "REEL_TOPIC", "رسالة رجاء وأمل"
@@ -859,6 +882,7 @@ def main():
         clean_text = clean_script(script)
         scenes = split_scenes(clean_text)
     plan = load_scene_plan()
+    apply_language(plan)
     if plan:
         scenes = [
             voice.strip_speaker_labels(str(s['narration']).strip())
