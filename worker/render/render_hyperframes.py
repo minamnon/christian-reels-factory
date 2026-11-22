@@ -68,7 +68,13 @@ def main():
         clean_text = base.clean_script(script)
         scenes = base.split_scenes(clean_text)
 
-    plan = base.load_scene_plan()
+    plan = None
+    try:
+        plan = base.load_scene_plan()
+    except Exception as plan_err:
+        print("Scene plan ignored (invalid JSON or schema):",
+              type(plan_err).__name__, str(plan_err)[:200])
+        plan = None
     if plan:
         scenes = [
             voice.strip_speaker_labels(str(s["narration"]).strip())
