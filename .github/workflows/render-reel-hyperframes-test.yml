@@ -1,0 +1,150 @@
+name: Render Reel (HyperFrames Test)
+
+# Experimental workflow — does NOT replace the main render-reel.yml.
+# Uses the same inputs and secrets, generates images + voice with the
+# existing Python pipeline, then assembles the final video with HyperFrames.
+# Output is an Actions artifact only (no GitHub Release).
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "Reel topic"
+        required: true
+        type: string
+      script:
+        description: "Complete reel script"
+        required: true
+        type: string
+      duration_seconds:
+        description: "Video duration"
+        required: true
+        default: "40"
+        type: string
+      facebook_title:
+        description: "Facebook post title"
+        required: true
+        type: string
+      facebook_caption:
+        description: "Facebook post caption"
+        required: true
+        type: string
+      facebook_hashtags:
+        description: "Facebook post hashtags"
+        required: true
+        type: string
+      scene_plan:
+        description: "Optional JSON scene plan"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  render-hf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ffmpeg \
+            fonts-noto-core \
+            fonts-noto-extra \
+            fontconfig \
+            libraqm-dev \
+            libharfbuzz-dev \
+            libfribidi-dev \
+            pkg-config \
+            libnss3 \
+            libatk-bridge2.0-0 \
+            libdrm2 \
+            libxkbcommon0 \
+            libgbm1 \
+            libasound2 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxfixes3 \
+            libxrandr2 \
+            libpango-1.0-0 \
+            libcairo2
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node.js 22 (required by HyperFrames)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r worker/render/requirements.txt
+
+      - name: Verify Arabic rendering support
+        run: |
+          python -c "from PIL import features; print('RAQM:', features.check_feature('raqm')); assert features.check_feature('raqm')"
+
+      - name: Pre-install HyperFrames CLI and probe environment
+        run: |
+          npx --yes hyperframes@latest --version
+          npx --yes hyperframes@latest doctor || true
+
+      - name: Generate images + voice then assemble with HyperFrames
+        env:
+          REEL_TOPIC: ${{ inputs.topic }}
+          REEL_SCRIPT: ${{ inputs.script }}
+          REEL_DURATION: ${{ inputs.duration_seconds }}
+          REEL_SCENE_PLAN: ${{ inputs.scene_plan }}
+          REEL_RENDERER: hyperframes
+          FACEBOOK_TITLE: ${{ inputs.facebook_title }}
+          FACEBOOK_CAPTION: ${{ inputs.facebook_caption }}
+          FACEBOOK_HASHTAGS: ${{ inputs.facebook_hashtags }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_AI_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+        run: |
+          python worker/render/render_hyperframes.py
+
+      - name: Write Facebook post file
+        env:
+          FACEBOOK_TITLE: ${{ inputs.facebook_title }}
+          FACEBOOK_CAPTION: ${{ inputs.facebook_caption }}
+          FACEBOOK_HASHTAGS: ${{ inputs.facebook_hashtags }}
+        run: |
+          mkdir -p output
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          title = os.environ["FACEBOOK_TITLE"].strip()
+          caption = os.environ["FACEBOOK_CAPTION"].strip()
+          hashtags = os.environ["FACEBOOK_HASHTAGS"].strip()
+          Path("output/facebook_post.txt").write_text(
+              f"{title}\n\n{caption}\n\n{hashtags}\n", encoding="utf-8"
+          )
+          print("facebook_post.txt written")
+          PY
+
+      - name: Upload HyperFrames reel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: christian-reel-hyperframes
+          path: |
+            output/*.mp4
+            output/facebook_post.txt
+            render_work/hf_project/index.html
+          if-no-files-found: error
+          retention-days: 5
