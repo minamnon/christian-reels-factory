@@ -86,7 +86,10 @@ def build_composition_html(
     """
     assert len(scene_images) == len(scene_durations)
 
-    # CSS for Ken-Burns style moves + subtitle styling
+    # CSS for Ken-Burns style moves + subtitle styling.
+    # NOTE: all visible text is pre-rendered PNG (Pillow + RAQM), so the page
+    # declares no font-family; HyperFrames lint rejects font families without
+    # @font-face and would fall back to a generic font (square boxes).
     css = f"""
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     html, body {{
@@ -94,7 +97,6 @@ def build_composition_html(
       height: {HEIGHT}px;
       overflow: hidden;
       background: #000;
-      font-family: "Noto Sans Arabic", "Noto Sans", system-ui, sans-serif;
     }}
     #root {{
       position: relative;
@@ -109,11 +111,6 @@ def build_composition_html(
       width: 100%;
       height: 100%;
     }}
-    .scene-wrap {{
-      position: absolute;
-      inset: 0;
-      overflow: hidden;
-    }}
     .scene-img {{
       position: absolute;
       width: 120%;
@@ -122,20 +119,6 @@ def build_composition_html(
       top: -10%;
       object-fit: cover;
       will-change: transform;
-    }}
-    .subtitle {{
-      position: absolute;
-      left: 5%;
-      right: 5%;
-      bottom: 12%;
-      text-align: center;
-      color: #fff;
-      font-size: 42px;
-      font-weight: 700;
-      line-height: 1.35;
-      text-shadow: 0 2px 8px rgba(0,0,0,0.85), 0 0 2px #000;
-      direction: rtl;
-      pointer-events: none;
     }}
     @keyframes kb-in {{
       from {{ transform: scale(1); }}
@@ -173,13 +156,11 @@ def build_composition_html(
     for i, (img, dur) in enumerate(zip(scene_images, scene_durations)):
         mode = MOTIONS[i % len(MOTIONS)]
         rel = f"assets/scene_{i:02d}{Path(img).suffix.lower()}"
-        # Visibility is driven by data-start / data-duration (HyperFrames clips).
-        # Camera motion is driven by a seekable GSAP timeline (registered below).
+        # Flat timeline element (HyperFrames lint: no nested content inside a
+        # timed clip). Camera motion is driven by the GSAP timeline below.
         clips_html.append(
-            f'''  <div class="clip scene-wrap" id="scene-{i}"
-       data-start="{t:.3f}" data-duration="{dur:.3f}" data-track-index="0">
-    <img class="scene-img" id="img-{i}" src="{rel}" alt="" />
-  </div>'''
+            f'''  <img class="clip scene-img" id="img-{i}" src="{rel}" alt=""
+       data-start="{t:.3f}" data-duration="{dur:.3f}" data-track-index="0" />'''
         )
         # Build GSAP tween for this scene's camera move (absolute film time)
         if mode == "in":
