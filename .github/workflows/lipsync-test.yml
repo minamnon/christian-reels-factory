@@ -58,6 +58,43 @@ jobs:
           sed -i 's/^from esrgan.upsample import load_sr$/load_sr = None/' inference.py
           grep -n "upscale\|load_sr" inference.py | head -4
 
+      - name: Patch fork to honor fixed face box (cartoon face detection fix)
+        run: |
+          cd w2l
+          python3 - <<'PY'
+          src = open('inference.py').read()
+          old = """        if frame_to_save is not None:
+                      face_detect_result = face_detect([frame_to_save])
+                      if len(face_detect_result) > 0:  # Check if face detection was successful
+                          face, coords = face_detect_result[0]
+                          face = cv2.resize(face, (args.img_size, args.img_size))
+                          img_batch.append(face)
+                          mel_batch.append(m)
+                          frame_batch.append(frame_to_save)
+                          coords_batch.append(coords)"""
+          new = """        if frame_to_save is not None:
+                      if args.box[0] != -1:
+                          y1b, y2b, x1b, x2b = args.box
+                          face = frame_to_save[y1b:y2b, x1b:x2b]
+                          face = cv2.resize(face, (args.img_size, args.img_size))
+                          img_batch.append(face)
+                          mel_batch.append(m)
+                          frame_batch.append(frame_to_save)
+                          coords_batch.append((y1b, y2b, x1b, x2b))
+                      else:
+                          face_detect_result = face_detect([frame_to_save])
+                          if len(face_detect_result) > 0:
+                              face, coords = face_detect_result[0]
+                              face = cv2.resize(face, (args.img_size, args.img_size))
+                              img_batch.append(face)
+                              mel_batch.append(m)
+                              frame_batch.append(frame_to_save)
+                              coords_batch.append(coords)"""
+          assert old in src, "patch pattern not found"
+          open('inference.py','w').write(src.replace(old, new))
+          print("patched fixed-box support")
+          PY
+
       - name: Run Wav2Lip lip-sync
         run: |
           cd w2l
@@ -67,7 +104,8 @@ jobs:
             --face ../work/mango_moving.mp4 \
             --audio ../work/voice.wav \
             --outfile ../work/lipsync_out.mp4 \
-            --wav2lip_batch_size 64
+            --wav2lip_batch_size 64 \
+            --box 30 215 70 270
 
       - name: Upload result
         uses: actions/upload-artifact@v4
