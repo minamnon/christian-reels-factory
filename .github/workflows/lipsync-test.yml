@@ -111,4 +111,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: lipsync-result
-          path: work/lipsync_out.mp4
+          path: |
+            work/lipsync_out.mp4
+            work/voice.wav
