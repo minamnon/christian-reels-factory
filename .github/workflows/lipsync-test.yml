@@ -1,0 +1,64 @@
+name: lipsync-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      line:
+        description: 'Arabic line spoken by the character'
+        required: true
+        default: 'يا عم ماتدوسش عليّا! أنا مانجا عسل!'
+
+jobs:
+  lipsync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Generate project voice via worker/render/voice.py (Gemini TTS)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+          LINE: ${{ inputs.line }}
+        run: |
+          mkdir -p work
+          python - <<'PY'
+          import os, sys
+          sys.path.insert(0, "worker/render")
+          import voice
+          out = voice.generate_voice(os.environ["LINE"].strip(), "work")
+          assert out, "all voice providers failed"
+          print("voice file:", out)
+          PY
+
+      - name: Clone Wav2Lip-HD fork (code only, then selected weights)
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y git-lfs ffmpeg
+          GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 https://huggingface.co/spaces/manavisrani07/gradio-lipsync-wav2lip w2l
+          cd w2l && git lfs pull --include="checkpoints/wav2lip_gan.pth,face_detection/detection/sfd/s3fd.pth"
+
+      - name: Install Python deps
+        run: |
+          pip install torch==2.0.1 torchvision==0.15.2 --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy==1.23.5 numba==0.56.4 librosa==0.9.2 opencv-python-headless scipy tqdm addict future yapf lmdb pyyaml scikit-image tb-nightly requests Pillow
+
+      - name: Run Wav2Lip lip-sync
+        run: |
+          cd w2l
+          python inference.py \
+            --checkpoint_path checkpoints/wav2lip_gan.pth \
+            --no_seg --no_sr \
+            --face ../worker/render/test_assets/mango_moving.mp4 \
+            --audio ../work/voice.wav \
+            --outfile ../work/lipsync_out.mp4 \
+            --wav2lip_batch_size 64
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: lipsync-result
+          path: work/lipsync_out.mp4
