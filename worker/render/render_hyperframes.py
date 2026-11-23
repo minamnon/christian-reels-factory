@@ -75,6 +75,10 @@ def main():
         print("Scene plan ignored (invalid JSON or schema):",
               type(plan_err).__name__, str(plan_err)[:200])
         plan = None
+    # Parity with render.py: apply the plan's language settings.
+    # Default stays Arabic (RTL fonts, ar-EG voices); only an explicit
+    # "language": "en" in the plan switches anything.
+    base.apply_language(plan)
     if plan:
         scenes = [
             voice.strip_speaker_labels(str(s["narration"]).strip())
@@ -156,11 +160,15 @@ def main():
         )
         if image_info and image_info.get("id"):
             used_ids.add(image_info["id"])
-        # Optional text overlay (kept for parity)
-        try:
-            image = base.add_scene_text(image, scene_text)
-        except Exception:
-            pass
+        # Bake scene text onto the image only when there are no timed
+        # subtitle PNGs (parity with render.py — avoids double text),
+        # and never swallow a rendering failure silently.
+        if not sub_events:
+            try:
+                image = base.add_scene_text(image, scene_text)
+            except Exception as text_err:
+                print("Scene text overlay failed:",
+                      type(text_err).__name__, str(text_err)[:200])
         img_path = WORK / f"scene_{index:02d}.png"
         image.save(img_path, format="PNG")
         scene_image_paths.append(img_path)
