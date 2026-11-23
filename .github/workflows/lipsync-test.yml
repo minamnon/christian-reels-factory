@@ -51,6 +51,13 @@ jobs:
       - name: Decode test asset
         run: base64 -d worker/render/test_assets/test_assets/mango_moving.mp4.b64 > work/mango_moving.mp4
 
+      - name: Stub unused esrgan imports in fork code
+        run: |
+          cd w2l
+          sed -i 's/^from esrgan.upsample import upscale$/upscale = None/' inference.py
+          sed -i 's/^from esrgan.upsample import load_sr$/load_sr = None/' inference.py
+          grep -n "upscale\|load_sr" inference.py | head -4
+
       - name: Run Wav2Lip lip-sync
         run: |
           cd w2l
