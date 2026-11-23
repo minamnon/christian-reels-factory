@@ -34,6 +34,8 @@ FPS = base.FPS
 def main():
     topic = os.environ.get("REEL_TOPIC", "رسالة رجاء وأمل").strip()
     script = os.environ.get("REEL_SCRIPT", "").strip()
+    # Dispatch forms are single-line; accept literal \n as line breaks.
+    script = script.replace("\\n", "\n")
     duration = int(os.environ.get("REEL_DURATION", "35"))
 
     if not script:
