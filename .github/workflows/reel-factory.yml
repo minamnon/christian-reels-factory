@@ -1,0 +1,251 @@
+name: reel-factory-experimental
+
+# EXPERIMENTAL PREVIEW PIPELINE (not production-ready).
+# Uses Wav2Lip, whose code/results are restricted to personal/research/academic
+# use only (no commercial use). Output reels are experimental previews.
+# This workflow is self-contained and never touches the production pipeline
+# (render.py / render-reel.yml).
+
+on:
+  workflow_dispatch:
+    inputs:
+      reel_title:
+        description: 'Reel title (Arabic), shown on the intro card'
+        required: true
+        default: 'الليمونة والفراولة'
+      scenes:
+        description: 'One scene per line: scene title | Arabic line | pollinations image prompt | optional box "y1 y2 x1 x2"'
+        required: true
+        default: |
+          الليمونة | أهلا بيكم تاني! أنا الليمونة، أكتر واحدة حامضة في التلاجة، بس اسمعوا قصتي الأول عشان هتضحككم! | cute 3d pixar style anthropomorphic lemon fruit character, one single lemon as the whole body, a cartoon face directly on the lemon itself, big expressive eyes and eyebrows, big wide open smiling mouth with visible teeth, tiny cartoon arms and legs, front view facing the camera, centered, plain soft studio background |
+      outro_text:
+        description: 'Closing card text'
+        required: false
+        default: 'متنسوش اللايك والاشتراك'
+
+jobs:
+  reel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: System deps and font
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y git-lfs ffmpeg fonts-cantarell
+          mkdir -p work/fonts
+          curl -L -s "https://raw.githubusercontent.com/google/fonts/main/ofl/cairo/Cairo%5Bwght%5D.ttf" -o work/fonts/Cairo.ttf
+          test -s work/fonts/Cairo.ttf
+
+      - name: Parse scenes
+        env:
+          SCENES: ${{ inputs.scenes }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          scenes = []
+          for raw in os.environ["SCENES"].strip().splitlines():
+              raw = raw.strip()
+              if not raw:
+                  continue
+              parts = [p.strip() for p in raw.split("|")]
+              assert len(parts) >= 3, f"bad scene line: {raw!r}"
+              box = [int(x) for x in parts[3].split()] if len(parts) > 3 and parts[3] else None
+              scenes.append({"title": parts[0], "line": parts[1], "prompt": parts[2], "box": box})
+          assert scenes, "no scenes"
+          json.dump(scenes, open("work/scenes.json", "w"), ensure_ascii=False)
+          print(f"{len(scenes)} scenes")
+          PY
+
+      - name: Generate voices via worker/render/voice.py (Gemini TTS)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          sys.path.insert(0, "worker/render")
+          import voice
+          scenes = json.load(open("work/scenes.json"))
+          for i, sc in enumerate(scenes):
+              d = f"work/scene{i}"
+              os.makedirs(d, exist_ok=True)
+              out = voice.generate_voice(sc["line"], d)
+              assert out, f"voice failed for scene {i}"
+              print("scene", i, "voice:", out)
+          PY
+
+      - name: Generate character images (pollinations, free, rate-limited)
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, time, urllib.parse
+          scenes = json.load(open("work/scenes.json"))
+          for i, sc in enumerate(scenes):
+              url = ("https://image.pollinations.ai/prompt/" + urllib.parse.quote(sc["prompt"])
+                     + "?width=1024&height=1536&nologo=true&seed=" + str(100 + i))
+              out = f"work/scene{i}/char.jpg"
+              subprocess.run(["curl", "-L", "-s", "--fail", "-A", "Mozilla/5.0",
+                              "-e", "https://pollinations.ai/", url, "-o", out], check=True)
+              subprocess.run(["file", out])
+              time.sleep(50)  # pollinations free tier: ~1 image / 45s / IP
+          PY
+
+      - name: Clone Wav2Lip-HD fork (code only, then selected weights)
+        run: |
+          GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 https://huggingface.co/spaces/manavisrani07/gradio-lipsync-wav2lip w2l
+          cd w2l && git lfs pull --include="checkpoints/wav2lip_gan.pth,face_detection/detection/sfd/s3fd.pth"
+
+      - name: Install Python deps
+        run: |
+          pip install torch==2.0.1 torchvision==0.15.2 --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy==1.23.5 numba==0.56.4 librosa==0.9.2 opencv-python-headless scipy tqdm addict future yapf lmdb pyyaml scikit-image tb-nightly requests Pillow
+          pip install --no-deps gfpgan facexlib
+          pip install filterpy
+
+      - name: Patch fork (stub esrgan, fixed face box, Gaussian feather blend)
+        run: |
+          cd w2l
+          sed -i 's/^from esrgan.upsample import upscale$/upscale = None/' inference.py
+          sed -i 's/^from esrgan.upsample import load_sr$/load_sr = None/' inference.py
+          python3 - <<'PY'
+          src = open('inference.py').read()
+          old_box = """        if frame_to_save is not None:
+                      face_detect_result = face_detect([frame_to_save])
+                      if len(face_detect_result) > 0:  # Check if face detection was successful
+                          face, coords = face_detect_result[0]
+                          face = cv2.resize(face, (args.img_size, args.img_size))
+                          img_batch.append(face)
+                          mel_batch.append(m)
+                          frame_batch.append(frame_to_save)
+                          coords_batch.append(coords)"""
+          new_box = """        if frame_to_save is not None:
+                      if args.box[0] != -1:
+                          y1b, y2b, x1b, x2b = args.box
+                          face = frame_to_save[y1b:y2b, x1b:x2b]
+                          face = cv2.resize(face, (args.img_size, args.img_size))
+                          img_batch.append(face)
+                          mel_batch.append(m)
+                          frame_batch.append(frame_to_save)
+                          coords_batch.append((y1b, y2b, x1b, x2b))
+                      else:
+                          face_detect_result = face_detect([frame_to_save])
+                          if len(face_detect_result) > 0:
+                              face, coords = face_detect_result[0]
+                              face = cv2.resize(face, (args.img_size, args.img_size))
+                              img_batch.append(face)
+                              mel_batch.append(m)
+                              frame_batch.append(frame_to_save)
+                              coords_batch.append(coords)"""
+          assert old_box in src, "box patch pattern not found"
+          src = src.replace(old_box, new_box)
+          old_paste = "\t\t\tf[y1:y2, x1:x2] = p"
+          new_paste = """\t\t\t_h, _w = p.shape[:2]
+          \t\t\t_fe = max(6, min(_h, _w)//10)
+          \t\t\t_mask = np.zeros((_h, _w), np.float32)
+          \t\t\t_mask[_fe:-_fe, _fe:-_fe] = 1.0
+          \t\t\t_mask = cv2.GaussianBlur(_mask, (0,0), _fe/2.0)[..., None]
+          \t\t\t_orig = f[y1:y2, x1:x2].astype(np.float32)
+          \t\t\tf[y1:y2, x1:x2] = (p.astype(np.float32)*_mask + _orig*(1.0-_mask)).astype(np.uint8)"""
+          assert old_paste in src, "feather patch pattern not found"
+          src = src.replace(old_paste, new_paste)
+          open('inference.py','w').write(src)
+          print("patched: fixed box + gaussian feather")
+          PY
+
+      - name: Run Wav2Lip lip-sync per scene (experimental preview)
+        run: |
+          python3 - <<'PY'
+          import json, subprocess
+          scenes = json.load(open("work/scenes.json"))
+          for i, sc in enumerate(scenes):
+              # default box: central face region (~works for centered front-view characters)
+              import cv2
+              img = cv2.imread(f"work/scene{i}/char.jpg")
+              h, w = img.shape[:2]
+              box = sc["box"] or [int(0.22*h), int(0.55*h), int(0.22*w), int(0.78*w)]
+              subprocess.run(["python", "inference.py",
+                              "--checkpoint_path", "checkpoints/wav2lip_gan.pth",
+                              "--no_seg", "--no_sr", "--nosmooth",
+                              "--face", f"../work/scene{i}/char.jpg",
+                              "--audio", f"../work/scene{i}/voice.wav",
+                              "--outfile", f"../work/scene{i}/sync.mp4",
+                              "--wav2lip_batch_size", "64",
+                              "--box", *map(str, box)], cwd="w2l", check=True)
+              print("scene", i, "synced, box", box)
+          PY
+
+      - name: Assemble 9:16 reel (fill-frame, titles, multi-angle first scenes)
+        env:
+          REEL_TITLE: ${{ inputs.reel_title }}
+          OUTRO_TEXT: ${{ inputs.outro_text }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          FONT = "work/fonts/Cairo.ttf"
+          scenes = json.load(open("work/scenes.json"))
+          def sh(cmd):
+              subprocess.run(cmd, check=True)
+          def card(path, title, sub, dur):
+              vf = (f"drawtext=fontfile={FONT}:text='{title}':fontsize=92:fontcolor=white:"
+                    f"borderw=4:bordercolor=black:x=(w-text_w)/2:y=(h/2)-140")
+              if sub:
+                  vf += (f",drawtext=fontfile={FONT}:text='{sub}':fontsize=60:fontcolor=0xFFD54F:"
+                         f"borderw=3:bordercolor=black:x=(w-text_w)/2:y=(h/2)+20")
+              sh(["ffmpeg","-y","-f","lavfi","-i",f"color=c=0x14213d:s=1080x1920:d={dur}:r=25",
+                  "-f","lavfi","-i","anullsrc=r=44100:cl=stereo","-vf",vf,
+                  "-c:v","libx264","-pix_fmt","yuv420p","-c:a","aac","-shortest",path])
+          def dur(v):
+              return float(subprocess.run(["ffprobe","-v","error","-show_entries","format=duration",
+                                           "-of","csv=p=0",v],capture_output=True,text=True).stdout.strip())
+          def multi(src, dst, half):
+              fc = (f"[0:v]trim=0:{half},setpts=PTS-STARTPTS[a];"
+                    f"[0:v]trim={half},setpts=PTS-STARTPTS,hflip[b];"
+                    f"[a][b]concat=n=2:v=1,setsar=1[v]")
+              sh(["ffmpeg","-y","-i",src,"-filter_complex",fc,"-map","[v]","-map","0:a",
+                  "-c:v","libx264","-pix_fmt","yuv420p","-c:a","copy",dst])
+          card("work/intro.mp4", "حكايات الفواكه", os.environ["REEL_TITLE"], 3.0)
+          card("work/outro.mp4", os.environ["OUTRO_TEXT"], "", 2.5)
+          inputs = ["work/intro.mp4"]
+          titles = [None]
+          for i, sc in enumerate(scenes):
+              src = f"work/scene{i}/sync.mp4"
+              if i < 2:  # multi-angle on the first two scenes
+                  dst = f"work/scene{i}/multi.mp4"
+                  multi(src, dst, round(dur(src)/2, 2))
+                  src = dst
+              inputs.append(src)
+              titles.append(sc["title"])
+          inputs.append("work/outro.mp4")
+          titles.append(None)
+          fc = []
+          for i, inp in enumerate(inputs):
+              if titles[i] is None:
+                  fc.append(f"[{i}:v]scale=1080:1920,setsar=1[v{i}]")
+              else:
+                  t = titles[i].replace("'", "").replace(":", " ")
+                  fc.append(
+                      f"[{i}:v]split[b{i}][f{i}];"
+                      f"[b{i}]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,gblur=sigma=30[bg{i}];"
+                      f"[f{i}]scale=w='if(gt(a,0.72),-2,1080)':h='if(gt(a,0.72),1500,-2)':flags=lanczos,crop=1080:1500,unsharp=5:5:0.8[fg{i}];"
+                      f"[bg{i}][fg{i}]overlay=(W-w)/2:(H-h)/2-80,"
+                      f"drawtext=fontfile={FONT}:text='{t}':fontsize=64:fontcolor=white:borderw=3:bordercolor=black:"
+                      f"x=(w-text_w)/2:y=110:enable='lt(t,4)',setsar=1[v{i}]")
+              fc.append(f"[{i}:a]aformat=sample_rates=44100:channel_layouts=stereo[a{i}]")
+          labels = "".join(f"[v{i}][a{i}]" for i in range(len(inputs)))
+          fc = ";".join(fc) + ";" + labels + f"concat=n={len(inputs)}:v=1:a=1[v][a]"
+          sh(["ffmpeg","-y"] + sum([["-i",x] for x in inputs], []) +
+             ["-filter_complex",fc,"-map","[v]","-map","[a]",
+              "-c:v","libx264","-preset","medium","-crf","20","-pix_fmt","yuv420p",
+              "-c:a","aac","-b:a","128k","-movflags","+faststart","work/reel.mp4"])
+          print("reel built")
+          PY
+
+      - name: Upload reel (experimental preview)
+        uses: actions/upload-artifact@v4
+        with:
+          name: reel-experimental-preview
+          path: work/reel.mp4
