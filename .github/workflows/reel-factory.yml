@@ -88,8 +88,19 @@ jobs:
               url = ("https://image.pollinations.ai/prompt/" + urllib.parse.quote(sc["prompt"])
                      + "?width=1024&height=1536&nologo=true&seed=" + str(100 + i))
               out = f"work/scene{i}/char.jpg"
-              subprocess.run(["curl", "-L", "-s", "--fail", "-A", "Mozilla/5.0",
-                              "-e", "https://pollinations.ai/", url, "-o", out], check=True)
+              ok = False
+              for attempt in range(4):
+                  r = subprocess.run(["curl", "-L", "-sS", "-w", "HTTP:%{http_code}",
+                                      "-A", "Mozilla/5.0", "-e", "https://pollinations.ai/",
+                                      url, "-o", out], capture_output=True, text=True)
+                  code = [x for x in r.stdout.split() if x.startswith("HTTP:")]
+                  code = code[-1][5:] if code else "?"
+                  if r.returncode == 0 and code == "200":
+                      ok = True
+                      break
+                  print(f"scene {i} attempt {attempt}: http {code} rc {r.returncode}; waiting 65s")
+                  time.sleep(65)
+              assert ok, f"image generation failed for scene {i}"
               subprocess.run(["file", out])
               time.sleep(50)  # pollinations free tier: ~1 image / 45s / IP
           PY
